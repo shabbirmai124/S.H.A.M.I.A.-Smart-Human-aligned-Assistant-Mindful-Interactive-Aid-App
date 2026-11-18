@@ -1,0 +1,10 @@
+{
+  "name": "S.H.A.M.I.A.",
+  "description": "Smart Human-aligned Assistant & Mindful Interactive Aid — offline-capable, permission-gated voice companion for Md Shabbir Mia.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

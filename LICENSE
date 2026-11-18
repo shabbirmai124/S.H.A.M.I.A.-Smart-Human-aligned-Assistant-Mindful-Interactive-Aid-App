@@ -1,0 +1,18 @@
+PROPRIETARY SOFTWARE LICENSE — ALL RIGHTS RESERVED
+
+Copyright (c) 2026 Md Shabbir Mia (shabbirmia520@gmail.com)
+All rights reserved.
+
+This software, including its source code, architecture, prompts, assets,
+and documentation ("S.H.A.M.I.A."), is the exclusive, confidential, and
+proprietary property of Md Shabbir Mia.
+
+RESTRICTIONS:
+1. Exclusive Personal Use Only: Only the author, Md Shabbir Mia, is granted
+   the right to use, execute, copy, modify, or deploy this software.
+2. No Redistribution or Sublicensing: No third party may copy, fork, publish,
+   distribute, sublicense, sell, or host this codebase or any derivative work
+   without prior explicit written permission signed by Md Shabbir Mia.
+3. Confidential Credentials: All API keys, tokens, and environment secrets
+   must remain strictly private in server-side .env files and excluded from
+   version control.
