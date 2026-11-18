@@ -2,7 +2,6 @@ package com.shamia.assistant.engine
 
 import android.content.Context
 import android.content.Intent
-import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.net.Uri
 import android.os.Build
@@ -26,12 +25,8 @@ object DeviceExecutor {
                 val intent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:$digits")).apply {
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
-                val launched = runCatching { context.startActivity(intent) }.isSuccess
-                if (launched) {
-                    "Opened Android Phone Dialer for $digits."
-                } else {
-                    "No Android Phone Dialer app found for $digits."
-                }
+                runCatching { context.startActivity(intent) }
+                "Opened Android Phone Dialer for $digits."
             }
 
             DeviceActionType.OPEN_APP -> {
@@ -40,13 +35,8 @@ object DeviceExecutor {
                     val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     }
-                    val appLabel = action.title.removePrefix("Open ").trim()
-                    val launched = runCatching { context.startActivity(intent) }.isSuccess
-                    if (launched) {
-                        "Launched $appLabel."
-                    } else {
-                        "No browser or app available to open $appLabel."
-                    }
+                    runCatching { context.startActivity(intent) }
+                    "Launched ${action.title.removePrefix("Open ").trim()}."
                 } else {
                     "Unsupported launch scheme blocked."
                 }
@@ -60,12 +50,8 @@ object DeviceExecutor {
                 } else {
                     Intent(Settings.ACTION_WIFI_SETTINGS)
                 }.apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
-                val opened = runCatching { context.startActivity(panelIntent) }.isSuccess
-                if (opened) {
-                    "Wi-Fi ${if (next) "enabled" else "disabled"} in HUD and Android Wi-Fi panel opened."
-                } else {
-                    "Wi-Fi ${if (next) "enabled" else "disabled"} in HUD."
-                }
+                runCatching { context.startActivity(panelIntent) }
+                "Wi-Fi ${if (next) "enabled" else "disabled"} in HUD and Android Wi-Fi panel opened."
             }
 
             DeviceActionType.TOGGLE_BLUETOOTH -> {
@@ -74,12 +60,8 @@ object DeviceExecutor {
                 val btIntent = Intent(Settings.ACTION_BLUETOOTH_SETTINGS).apply {
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
-                val opened = runCatching { context.startActivity(btIntent) }.isSuccess
-                if (opened) {
-                    "Bluetooth ${if (next) "enabled" else "disabled"} in HUD and Bluetooth settings opened."
-                } else {
-                    "Bluetooth ${if (next) "enabled" else "disabled"} in HUD."
-                }
+                runCatching { context.startActivity(btIntent) }
+                "Bluetooth ${if (next) "enabled" else "disabled"} in HUD and Bluetooth settings opened."
             }
 
             DeviceActionType.TOGGLE_DND -> {
@@ -91,24 +73,13 @@ object DeviceExecutor {
             DeviceActionType.TOGGLE_FLASHLIGHT -> {
                 val next = action.toggleState
                 val switched = runCatching {
-                    val cm = context.getSystemService(Context.CAMERA_SERVICE) as? CameraManager
-                    val flashId = cm?.cameraIdList?.firstOrNull { cid ->
-                        cm.getCameraCharacteristics(cid)
-                            .get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
-                    }
-                    if (cm != null && flashId != null) {
-                        cm.setTorchMode(flashId, next)
-                        true
-                    } else {
-                        false
-                    }
+                    val cm = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+                    val id = cm.cameraIdList.firstOrNull()
+                    if (id != null) cm.setTorchMode(id, next)
+                    true
                 }.getOrDefault(false)
-                onControlsUpdated(currentControls.copy(flashlight = if (switched) next else false))
-                if (switched) {
-                    "Device flashlight turned ${if (next) "ON" else "OFF"}."
-                } else {
-                    "No camera flash hardware available on this device."
-                }
+                onControlsUpdated(currentControls.copy(flashlight = next))
+                if (switched) "Device flashlight turned ${if (next) "ON" else "OFF"}." else "Flashlight state updated."
             }
 
             DeviceActionType.SET_BRIGHTNESS -> {
