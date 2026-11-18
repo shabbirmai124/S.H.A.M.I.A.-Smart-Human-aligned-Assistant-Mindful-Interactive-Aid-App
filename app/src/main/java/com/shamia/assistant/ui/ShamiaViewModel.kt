@@ -30,6 +30,7 @@ import com.shamia.assistant.model.RoutineItem
 import com.shamia.assistant.model.SyllabusItem
 import com.shamia.assistant.model.TaskItem
 import com.shamia.assistant.model.UserIdentityProfile
+import com.shamia.assistant.model.VoiceGender
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -61,6 +62,8 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
             ?: ModelCatalog.CATALOG.first()
         val initialSession = "session-${System.currentTimeMillis()}"
 
+        val initialGender = VoiceGender.entries.firstOrNull { it.name == store.loadVoiceGender() } ?: VoiceGender.FEMALE
+
         _ui.update {
             it.copy(
                 chatSessionId = initialSession,
@@ -77,6 +80,8 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
                 installedModelIds = store.loadInstalledModelIds(),
                 installedVoiceIds = store.loadInstalledVoiceIds(),
                 selectedModelId = activeSpec.id,
+                voiceGender = initialGender,
+                showAllModels = store.loadShowAllModels(),
                 ensembleEnabled = store.loadEnsembleEnabled(),
                 ensembleModelIds = store.loadEnsembleIds(),
                 useResearch = store.loadUseResearch(),
@@ -86,7 +91,7 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
             )
         }
 
-        voiceEngine.initTts { isSpeaking ->
+        voiceEngine.initTts(initialGender) { isSpeaking ->
             _ui.update { state ->
                 state.copy(
                     coreState = if (isSpeaking) CoreVisualState.SPEAKING
@@ -133,20 +138,28 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
     fun clearBanner() = _ui.update { it.copy(statusBanner = null) }
 
     fun startNewChat() {
+        startNewChatWithModel(_ui.value.selectedModelId)
+    }
+
+    fun startNewChatWithModel(modelId: String) {
         generationJob?.cancel()
         generationJob = null
         voiceEngine.stopSpeaking()
-        val state = _ui.value
-        val activeSpec = state.selectedModel
+        val chosen = _ui.value.allModels.find { it.id == modelId } ?: _ui.value.selectedModel
+        store.saveSelectedModelId(chosen.id)
         val freshSession = "session-${System.currentTimeMillis()}"
-        Log.i("ShamiaModelRouter", "NEW CHAT | session=$freshSession | activeModel=${activeSpec.id}")
+        Log.i(
+            "ShamiaModelRouter",
+            "NEW CHAT WITH MODEL | session=$freshSession | id=${chosen.id} | ollama=${chosen.ollamaTag} | cloud=${chosen.cloudModelId}"
+        )
         _ui.update {
             it.copy(
                 chatSessionId = freshSession,
+                selectedModelId = chosen.id,
                 coreState = CoreVisualState.IDLE,
                 liveTranscript = "",
-                messages = listOf(buildWelcomeMessage(it.identity, activeSpec, freshSession)),
-                statusBanner = "New chat started · Active model: ${activeSpec.name}"
+                messages = listOf(buildWelcomeMessage(it.identity, chosen, freshSession)),
+                statusBanner = "New chat started with ${chosen.name} (${chosen.ollamaTag ?: chosen.cloudModelId})."
             )
         }
     }
@@ -426,6 +439,16 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun toggleVoiceReply() = _ui.update { val next = !it.voiceReplyEnabled; if (!next) voiceEngine.stopSpeaking(); it.copy(voiceReplyEnabled = next) }
+    fun setVoiceGender(gender: VoiceGender) {
+        store.saveVoiceGender(gender.name)
+        voiceEngine.setVoiceGender(gender)
+        _ui.update { it.copy(voiceGender = gender, statusBanner = "Clear Natural Voice set to ${gender.label}.") }
+    }
+    fun toggleShowAllModels() {
+        val next = !_ui.value.showAllModels
+        store.saveShowAllModels(next)
+        _ui.update { it.copy(showAllModels = next) }
+    }
     fun toggleWebResearch() = _ui.update { val next = !it.useResearch; store.saveUseResearch(next); it.copy(useResearch = next) }
     fun toggleEnsembleEnabled() = _ui.update { val next = !it.ensembleEnabled; store.saveEnsembleEnabled(next); it.copy(ensembleEnabled = next) }
 

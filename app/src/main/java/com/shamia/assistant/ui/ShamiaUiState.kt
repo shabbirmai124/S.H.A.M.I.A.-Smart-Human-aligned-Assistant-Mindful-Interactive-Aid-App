@@ -16,6 +16,7 @@ import com.shamia.assistant.model.RoutineItem
 import com.shamia.assistant.model.SyllabusItem
 import com.shamia.assistant.model.TaskItem
 import com.shamia.assistant.model.UserIdentityProfile
+import com.shamia.assistant.model.VoiceGender
 
 data class ShamiaUiState(
     val chatSessionId: String = "session-initial",
@@ -28,6 +29,8 @@ data class ShamiaUiState(
     val coreState: CoreVisualState = CoreVisualState.IDLE,
     val liveTranscript: String = "",
     val voiceReplyEnabled: Boolean = true,
+    val voiceGender: VoiceGender = VoiceGender.FEMALE,
+    val showAllModels: Boolean = false,
     val useResearch: Boolean = true,
     val selectedModelId: String = "gemma-4-free",
     val ensembleEnabled: Boolean = false,
@@ -54,6 +57,15 @@ data class ShamiaUiState(
 ) {
     val allModels: List<OpenSourceModelSpec>
         get() = ModelCatalog.CATALOG + customModels
+
+    fun isModelSafeForDevice(spec: OpenSourceModelSpec): Boolean =
+        spec.isBuiltInOffline || hardware.ramGb >= spec.minRamGb || spec.sizeLabel.contains("Cloud", ignoreCase = true)
+
+    val compatibleModels: List<OpenSourceModelSpec>
+        get() = allModels.filter { isModelSafeForDevice(it) }
+
+    val displayedModels: List<OpenSourceModelSpec>
+        get() = if (showAllModels) allModels else compatibleModels
 
     val selectedModel: OpenSourceModelSpec
         get() = allModels.find { it.id == selectedModelId } ?: ModelCatalog.CATALOG.first()

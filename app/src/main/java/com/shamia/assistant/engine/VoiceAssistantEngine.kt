@@ -30,22 +30,27 @@ class VoiceAssistantEngine(private val context: Context) {
     private var tts: TextToSpeech? = null
     private var ttsReady = false
     private var speechRecognizer: SpeechRecognizer? = null
+    private var currentVoiceGender: com.shamia.assistant.model.VoiceGender =
+        com.shamia.assistant.model.VoiceGender.FEMALE
     private val mainHandler = Handler(Looper.getMainLooper())
     private val audioScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var ambientJob: Job? = null
     @Volatile
     private var ambientVolume: Float = 0.25f
 
-    fun initTts(onSpeakingChanged: (Boolean) -> Unit) {
+    fun initTts(
+        initialGender: com.shamia.assistant.model.VoiceGender = com.shamia.assistant.model.VoiceGender.FEMALE,
+        onSpeakingChanged: (Boolean) -> Unit
+    ) {
+        currentVoiceGender = initialGender
         tts = TextToSpeech(context.applicationContext) { status ->
             if (status == TextToSpeech.SUCCESS) {
                 val res = tts?.setLanguage(Locale.UK)
                 if (res == TextToSpeech.LANG_MISSING_DATA || res == TextToSpeech.LANG_NOT_SUPPORTED) {
                     tts?.setLanguage(Locale.US)
                 }
-                tts?.setPitch(0.94f)
-                tts?.setSpeechRate(1.03f)
                 ttsReady = true
+                applyVoiceProfile(currentVoiceGender)
                 tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                     override fun onStart(utteranceId: String?) = mainHandler.post { onSpeakingChanged(true) }.let {}
                     override fun onDone(utteranceId: String?) = mainHandler.post { onSpeakingChanged(false) }.let {}
@@ -53,6 +58,41 @@ class VoiceAssistantEngine(private val context: Context) {
                     override fun onError(utteranceId: String?) = mainHandler.post { onSpeakingChanged(false) }.let {}
                 })
             }
+        }
+    }
+
+    fun setVoiceGender(gender: com.shamia.assistant.model.VoiceGender) {
+        currentVoiceGender = gender
+        if (ttsReady) {
+            applyVoiceProfile(gender)
+        }
+    }
+
+    private fun applyVoiceProfile(gender: com.shamia.assistant.model.VoiceGender) {
+        val engine = tts ?: return
+        val voices = runCatching { engine.voices }.getOrNull().orEmpty()
+        val englishVoices = voices.filter { v ->
+            v.locale?.language.equals("en", ignoreCase = true)
+        }
+        val preferredTokens = if (gender == com.shamia.assistant.model.VoiceGender.FEMALE) {
+            listOf("female", "#female", "f00", "sfg", "gba", "gbc", "tpf", "iom", "iob")
+        } else {
+            listOf("male", "#male", "m00", "iol", "rjs", "gbb", "gbd", "tpd", "iod")
+        }
+        val matched = englishVoices.firstOrNull { voice ->
+            val n = voice.name.lowercase(Locale.US)
+            preferredTokens.any { token -> n.contains(token) } &&
+                !(gender == com.shamia.assistant.model.VoiceGender.MALE && n.contains("female"))
+        }
+        if (matched != null) {
+            runCatching { engine.voice = matched }
+        }
+        if (gender == com.shamia.assistant.model.VoiceGender.FEMALE) {
+            engine.setPitch(1.04f)
+            engine.setSpeechRate(0.98f)
+        } else {
+            engine.setPitch(0.88f)
+            engine.setSpeechRate(1.00f)
         }
     }
 

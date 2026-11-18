@@ -51,6 +51,12 @@ class RoutineSyllabusStore(context: Context) {
     fun loadUseResearch(): Boolean = prefs.getBoolean("use_research", true)
     fun saveUseResearch(enabled: Boolean) = prefs.edit().putBoolean("use_research", enabled).apply()
 
+    fun loadVoiceGender(): String = prefs.getString("voice_gender", "FEMALE") ?: "FEMALE"
+    fun saveVoiceGender(gender: String) = prefs.edit().putString("voice_gender", gender).apply()
+
+    fun loadShowAllModels(): Boolean = prefs.getBoolean("show_all_models", false)
+    fun saveShowAllModels(showAll: Boolean) = prefs.edit().putBoolean("show_all_models", showAll).apply()
+
     fun loadOllamaEndpoint(): String = prefs.getString("ollama_endpoint", "http://127.0.0.1:11434") ?: "http://127.0.0.1:11434"
     fun saveOllamaEndpoint(url: String) = prefs.edit().putString("ollama_endpoint", url).apply()
 

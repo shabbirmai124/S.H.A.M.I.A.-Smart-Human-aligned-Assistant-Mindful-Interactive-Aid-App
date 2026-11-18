@@ -72,6 +72,11 @@ enum class VoiceModelKind {
     TTS
 }
 
+enum class VoiceGender(val label: String) {
+    FEMALE("Female (Clear)"),
+    MALE("Male (Clear)")
+}
+
 enum class RoutineCategory(val label: String) {
     ROUTINE("Routine"),
     CLASS("Class"),

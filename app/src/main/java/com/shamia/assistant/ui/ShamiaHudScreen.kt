@@ -41,6 +41,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.shamia.assistant.R
 import com.shamia.assistant.ui.components.AccountIdentityDialog
 import com.shamia.assistant.ui.components.HudConversationPane
+import com.shamia.assistant.ui.components.NewChatModelDialog
 import com.shamia.assistant.ui.components.TopCockpitBar
 import com.shamia.assistant.ui.tabs.ModelsHubTab
 import com.shamia.assistant.ui.tabs.PhoneAndVaultTab
@@ -64,6 +65,7 @@ fun ShamiaHudScreen(
     val state by vm.ui.collectAsStateWithLifecycle()
     var currentTab by remember { mutableStateOf(WorkspaceTab.HUD) }
     var showIdentityDialog by remember { mutableStateOf(false) }
+    var showNewChatDialog by remember { mutableStateOf(false) }
     var inputDraft by remember { mutableStateOf("") }
     var modelDropdownExpanded by remember { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
@@ -78,6 +80,20 @@ fun ShamiaHudScreen(
             snackbarHostState.showSnackbar(msg)
             vm.clearBanner()
         }
+    }
+
+    if (showNewChatDialog) {
+        NewChatModelDialog(
+            models = state.allModels,
+            selectedModelId = state.selectedModelId,
+            isSafeForDevice = state::isModelSafeForDevice,
+            onDismiss = { showNewChatDialog = false },
+            onStartWithModel = { chosenId ->
+                vm.startNewChatWithModel(chosenId)
+                showNewChatDialog = false
+                currentTab = WorkspaceTab.HUD
+            }
+        )
     }
 
     if (showIdentityDialog) {
@@ -121,10 +137,7 @@ fun ShamiaHudScreen(
                             vm.selectModel(id)
                             modelDropdownExpanded = false
                         },
-                        onNewChat = {
-                            vm.startNewChat()
-                            currentTab = WorkspaceTab.HUD
-                        },
+                        onNewChat = { showNewChatDialog = true },
                         onToggleVoiceReply = vm::toggleVoiceReply,
                         onOpenIdentity = { showIdentityDialog = true }
                     )
@@ -278,11 +291,17 @@ private fun WorkspaceTabContent(
         WorkspaceTab.MODELS -> ModelsHubTab(
             state = state,
             onSelectModel = vm::selectModel,
+            onNewChatWithModel = { chosenId ->
+                vm.startNewChatWithModel(chosenId)
+                onSwitchToHud()
+            },
             onToggleInstallModel = vm::toggleInstallModel,
             onToggleInstallVoice = vm::toggleInstallVoiceModel,
+            onSelectVoiceGender = vm::setVoiceGender,
             onToggleResearch = vm::toggleWebResearch,
             onToggleEnsemble = vm::toggleEnsembleEnabled,
             onToggleEnsembleMember = vm::toggleEnsembleMember,
+            onToggleShowAllModels = vm::toggleShowAllModels,
             onAddCustomModel = vm::addCustomModel,
             onSaveEndpointsAndTest = vm::updateEndpointsAndTest,
             onStartNewChatWithActiveModel = {
