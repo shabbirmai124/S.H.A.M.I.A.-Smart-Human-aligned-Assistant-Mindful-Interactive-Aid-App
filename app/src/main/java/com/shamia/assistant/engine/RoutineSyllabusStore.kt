@@ -68,7 +68,7 @@ class RoutineSyllabusStore(context: Context) {
         bluetooth = prefs.getBoolean("ctrl_bt", true),
         dnd = prefs.getBoolean("ctrl_dnd", false),
         flashlight = false,
-        brightnessPct = prefs.getInt("ctrl_brightness", 100).coerceIn(25, 100)
+        brightnessPct = prefs.getInt("ctrl_brightness", 100).coerceIn(10, 100)
     )
 
     fun saveControls(controls: DeviceControlState) {

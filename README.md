@@ -82,3 +82,13 @@ ollama pull deepseek-r1:1.5b
 
 Open the **Models** tab inside S.H.A.M.I.A., verify `http://127.0.0.1:11434`, and tap **Test**.
 
+---
+
+## Install S.H.A.M.I.A. on Your Android Phone (Android 8.0+ / API 26+)
+
+- **Pre-signed Debug APK (`app/build.gradle.kts`):** Configured with `applicationId = "com.shamia.assistant.k7m2xp"`, `minSdk = 26`, `targetSdk = 36`, adaptive launcher icon, and `debugConfig` signing (`debug.keystore`).
+- **Build Locally in Android Studio:**
+  1. Export project ZIP and open the root folder in Android Studio.
+  2. Connect your phone via USB (with **USB Debugging** enabled) and press **Run**, **or** select **Build > Build Bundle(s) / APK(s) > Build APK(s)**.
+  3. Transfer `app/build/outputs/apk/debug/app-debug.apk` to your phone and tap to install.
+
