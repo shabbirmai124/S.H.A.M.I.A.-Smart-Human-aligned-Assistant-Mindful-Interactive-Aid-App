@@ -44,11 +44,11 @@ fun AccountIdentityDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = CardSlate,
-        title = { Text("Owner Profile · Md Shabbir Mia", color = TextPrimary) },
+        title = { Text("S.H.A.M.I.A. · Owner Profile", color = TextPrimary) },
         text = {
             Column(modifier = Modifier.fillMaxWidth()) {
                 Text(
-                    text = "All routine, syllabus, and permission settings remain encrypted in your private on-device vault.",
+                    text = "S.H.A.M.I.A. — Smart Human-aligned Assistant & Mindful Interactive Aid, crafted for Md Shabbir Mia. All routine, syllabus, and permissions stay private on-device.",
                     style = MaterialTheme.typography.bodySmall,
                     color = TextSecondary
                 )

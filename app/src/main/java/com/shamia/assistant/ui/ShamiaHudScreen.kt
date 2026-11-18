@@ -17,6 +17,7 @@ import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.SettingsInputComponent
+import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -46,15 +47,17 @@ import com.shamia.assistant.ui.components.TopCockpitBar
 import com.shamia.assistant.ui.tabs.ModelsHubTab
 import com.shamia.assistant.ui.tabs.PhoneAndVaultTab
 import com.shamia.assistant.ui.tabs.PlannerTab
+import com.shamia.assistant.ui.tabs.VaultTab
 import com.shamia.assistant.ui.theme.GraphiteSurface
 import com.shamia.assistant.ui.theme.ObsidianVoid
 import com.shamia.assistant.ui.theme.SapphirePulse
 
 enum class WorkspaceTab(val label: String) {
     HUD("HUD"),
+    PLANNER("Tasks"),
+    PHONE("Phone"),
     MODELS("Models"),
-    PLANNER("Planner"),
-    PHONE("Controls")
+    VAULT("Vault")
 }
 
 @Composable
@@ -144,6 +147,7 @@ fun ShamiaHudScreen(
                 },
                 bottomBar = {
                     if (!isWideTablet) {
+                        val pendingTasks = state.tasks.count { !it.completed }
                         NavigationBar(containerColor = GraphiteSurface) {
                             NavigationBarItem(
                                 selected = currentTab == WorkspaceTab.HUD,
@@ -152,22 +156,28 @@ fun ShamiaHudScreen(
                                 label = { Text("HUD") }
                             )
                             NavigationBarItem(
+                                selected = currentTab == WorkspaceTab.PLANNER,
+                                onClick = { currentTab = WorkspaceTab.PLANNER },
+                                icon = { Icon(Icons.Filled.DateRange, contentDescription = "Tasks and Planner") },
+                                label = { Text("Tasks ($pendingTasks)") }
+                            )
+                            NavigationBarItem(
+                                selected = currentTab == WorkspaceTab.PHONE,
+                                onClick = { currentTab = WorkspaceTab.PHONE },
+                                icon = { Icon(Icons.Filled.SettingsInputComponent, contentDescription = "Phone Controls") },
+                                label = { Text("Phone") }
+                            )
+                            NavigationBarItem(
                                 selected = currentTab == WorkspaceTab.MODELS,
                                 onClick = { currentTab = WorkspaceTab.MODELS },
                                 icon = { Icon(Icons.Filled.Memory, contentDescription = "Models Hub") },
                                 label = { Text("Models") }
                             )
                             NavigationBarItem(
-                                selected = currentTab == WorkspaceTab.PLANNER,
-                                onClick = { currentTab = WorkspaceTab.PLANNER },
-                                icon = { Icon(Icons.Filled.DateRange, contentDescription = "Routine and Syllabus Planner") },
-                                label = { Text("Planner") }
-                            )
-                            NavigationBarItem(
-                                selected = currentTab == WorkspaceTab.PHONE,
-                                onClick = { currentTab = WorkspaceTab.PHONE },
-                                icon = { Icon(Icons.Filled.SettingsInputComponent, contentDescription = "Phone Controls and Vault") },
-                                label = { Text("Controls") }
+                                selected = currentTab == WorkspaceTab.VAULT,
+                                onClick = { currentTab = WorkspaceTab.VAULT },
+                                icon = { Icon(Icons.Filled.Shield, contentDescription = "Permission Vault") },
+                                label = { Text("Vault") }
                             )
                         }
                     }
@@ -209,13 +219,14 @@ fun ShamiaHudScreen(
                         }
 
                         val sideTab = if (currentTab == WorkspaceTab.HUD) WorkspaceTab.MODELS else currentTab
+                        val pendingTasks = state.tasks.count { !it.completed }
                         Column(
                             modifier = Modifier
                                 .weight(0.44f)
                                 .fillMaxHeight()
                                 .background(GraphiteSurface.copy(alpha = 0.72f))
                         ) {
-                            val sideTabs = listOf(WorkspaceTab.MODELS, WorkspaceTab.PLANNER, WorkspaceTab.PHONE)
+                            val sideTabs = listOf(WorkspaceTab.PLANNER, WorkspaceTab.PHONE, WorkspaceTab.MODELS, WorkspaceTab.VAULT)
                             TabRow(
                                 selectedTabIndex = sideTabs.indexOf(sideTab).coerceAtLeast(0),
                                 containerColor = GraphiteSurface,
@@ -225,7 +236,9 @@ fun ShamiaHudScreen(
                                     Tab(
                                         selected = sideTab == tab,
                                         onClick = { currentTab = tab },
-                                        text = { Text(tab.label) }
+                                        text = {
+                                            Text(if (tab == WorkspaceTab.PLANNER) "Tasks ($pendingTasks)" else tab.label)
+                                        }
                                     )
                                 }
                             }
@@ -338,6 +351,10 @@ private fun WorkspaceTabContent(
             },
             onPlayTrack = vm::playAmbientTrack,
             onDismissAlarm = vm::dismissAlarm,
+            onSetPermission = vm::setPermissionPolicy
+        )
+        WorkspaceTab.VAULT -> VaultTab(
+            state = state,
             onSetPermission = vm::setPermissionPolicy
         )
     }

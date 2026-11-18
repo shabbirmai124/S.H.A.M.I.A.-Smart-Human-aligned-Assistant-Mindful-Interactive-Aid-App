@@ -30,13 +30,13 @@ enum class MessageSource(val label: String) {
 }
 
 enum class PermissionCapability(val label: String, val description: String) {
-    DIAL_CONTACT("Phone Dialer", "Open Android dialer only after your explicit confirmation."),
-    OPEN_APP("App Launcher", "Launch verified Android apps (Spotify, Maps, Calendar, Gmail)."),
-    DEVICE_CONTROL("Device Controls", "Toggle Wi-Fi panel, Bluetooth settings, DND, Torch, and Brightness."),
-    PLAY_MUSIC("Audio & Music", "Play offline focus tones and polyphonic ambient audio."),
-    SET_ALARM("Alarms & Timers", "Schedule countdown reminders and audible chime alerts."),
-    MANAGE_MEMORY("Routine & Syllabus", "Persist tasks, notes, daily routine, and university syllabus locally."),
-    MICROPHONE("Voice Microphone", "Capture spoken input via Android SpeechRecognizer.")
+    DIAL_CONTACT("Phone Dialer", "Place calls or open tel: links when you ask to dial a number."),
+    OPEN_APP("App Launcher", "Open external apps and web destinations (Spotify, Maps, Calendar, Gmail)."),
+    DEVICE_CONTROL("Phone Hardware Controls", "Toggle Wi-Fi, Bluetooth, Do Not Disturb, Flashlight, and Screen Brightness."),
+    PLAY_MUSIC("Music & Media", "Start ambient audio playback and control the active track queue."),
+    SET_ALARM("Alarms & Timers", "Arm countdown alarms and play audible chime alerts."),
+    MANAGE_MEMORY("Tasks & Notes Memory", "Save priorities, notes, and clear completed items in local storage."),
+    MICROPHONE("Voice Microphone", "Capture spoken commands via Android Speech Recognition.")
 }
 
 enum class PermissionPolicy {
@@ -95,8 +95,8 @@ data class OpenSourceModelSpec(
     val params: String,
     val sizeLabel: String,
     val minRamGb: Int,
-    val chipsetNote: String,
-    val runtimeLabel: String = "Cloud + Ollama / On-Device",
+    val chipsetNote: String = "Compatible",
+    val runtimeLabel: String = "Cloud + Ollama",
     val hfRepo: String? = null,
     val ollamaTag: String? = null,
     val cloudModelId: String = "openai",
@@ -104,6 +104,7 @@ data class OpenSourceModelSpec(
     val styleProfile: String = "",
     val summary: String = "",
     val isBuiltInOffline: Boolean = false,
+    val supportsOfflineInstall: Boolean = true,
     val isCustom: Boolean = false
 )
 
@@ -120,9 +121,11 @@ data class OfflineVoiceModelSpec(
 
 data class DeviceHardwareSpec(
     val ramGb: Int,
+    val availRamMb: Int = 2048,
+    val isLowMemory: Boolean = false,
     val cpuCores: Int,
     val deviceLabel: String,
-    val recommendedTier: String = "4nm / 6nm Ready"
+    val recommendedTier: String = "OOM Protected"
 )
 
 data class DeviceTelemetry(

@@ -73,7 +73,10 @@ class VoiceAssistantEngine(private val context: Context) {
         val voices = runCatching { engine.voices }.getOrNull().orEmpty()
         val englishVoices = voices.filter { v ->
             v.locale?.language.equals("en", ignoreCase = true)
-        }
+        }.sortedWith(
+            compareBy<android.speech.tts.Voice> { it.isNetworkConnectionRequired }
+                .thenByDescending { it.quality }
+        )
         val preferredTokens = if (gender == com.shamia.assistant.model.VoiceGender.FEMALE) {
             listOf("female", "#female", "f00", "sfg", "gba", "gbc", "tpf", "iom", "iob")
         } else {
@@ -83,16 +86,18 @@ class VoiceAssistantEngine(private val context: Context) {
             val n = voice.name.lowercase(Locale.US)
             preferredTokens.any { token -> n.contains(token) } &&
                 !(gender == com.shamia.assistant.model.VoiceGender.MALE && n.contains("female"))
-        }
+        } ?: englishVoices.firstOrNull()
         if (matched != null) {
             runCatching { engine.voice = matched }
         }
-        if (gender == com.shamia.assistant.model.VoiceGender.FEMALE) {
-            engine.setPitch(1.04f)
-            engine.setSpeechRate(0.98f)
-        } else {
-            engine.setPitch(0.88f)
-            engine.setSpeechRate(1.00f)
+        runCatching {
+            if (gender == com.shamia.assistant.model.VoiceGender.FEMALE) {
+                engine.setPitch(1.04f)
+            } else {
+                engine.setPitch(0.88f)
+            }
+            // Measured, natural articulation (0.92f) for crisp comprehension by non-native listeners
+            engine.setSpeechRate(0.92f)
         }
     }
 
@@ -105,11 +110,13 @@ class VoiceAssistantEngine(private val context: Context) {
             .replace(Regex("[*_`#]"), "")
             .trim()
         if (clean.isEmpty()) return
-        tts?.speak(clean, TextToSpeech.QUEUE_FLUSH, null, "shamia_${System.currentTimeMillis()}")
+        runCatching {
+            tts?.speak(clean, TextToSpeech.QUEUE_FLUSH, null, "shamia_${System.currentTimeMillis()}")
+        }
     }
 
     fun stopSpeaking() {
-        tts?.stop()
+        runCatching { tts?.stop() }
     }
 
     fun startListening(
@@ -118,52 +125,56 @@ class VoiceAssistantEngine(private val context: Context) {
         onError: (String) -> Unit
     ) {
         mainHandler.post {
-            if (!SpeechRecognizer.isRecognitionAvailable(context)) {
-                onError("Android SpeechRecognizer is unavailable on this device.")
-                return@post
-            }
-            speechRecognizer?.destroy()
-            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context).apply {
-                setRecognitionListener(object : RecognitionListener {
-                    override fun onReadyForSpeech(params: Bundle?) {}
-                    override fun onBeginningOfSpeech() {}
-                    override fun onRmsChanged(rmsdB: Float) {}
-                    override fun onBufferReceived(buffer: ByteArray?) {}
-                    override fun onEndOfSpeech() {}
-                    override fun onEvent(eventType: Int, params: Bundle?) {}
+            runCatching {
+                if (!SpeechRecognizer.isRecognitionAvailable(context)) {
+                    onError("Android SpeechRecognizer is unavailable on this device.")
+                    return@post
+                }
+                speechRecognizer?.destroy()
+                speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context).apply {
+                    setRecognitionListener(object : RecognitionListener {
+                        override fun onReadyForSpeech(params: Bundle?) {}
+                        override fun onBeginningOfSpeech() {}
+                        override fun onRmsChanged(rmsdB: Float) {}
+                        override fun onBufferReceived(buffer: ByteArray?) {}
+                        override fun onEndOfSpeech() {}
+                        override fun onEvent(eventType: Int, params: Bundle?) {}
 
-                    override fun onPartialResults(partialResults: Bundle?) {
-                        val list = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                        val partial = list?.firstOrNull().orEmpty()
-                        if (partial.isNotBlank()) onPartial(partial)
-                    }
-
-                    override fun onResults(results: Bundle?) {
-                        val list = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                        val best = list?.firstOrNull().orEmpty().trim()
-                        if (best.isNotEmpty()) onFinal(best) else onError("No speech detected.")
-                    }
-
-                    override fun onError(error: Int) {
-                        val msg = when (error) {
-                            SpeechRecognizer.ERROR_AUDIO -> "Microphone audio error."
-                            SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Grant Microphone permission in Android Settings."
-                            SpeechRecognizer.ERROR_NO_MATCH -> "Did not catch that clearly—please try again."
-                            SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Listening timed out."
-                            else -> "Voice recognition unavailable right now."
+                        override fun onPartialResults(partialResults: Bundle?) {
+                            val list = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                            val partial = list?.firstOrNull().orEmpty()
+                            if (partial.isNotBlank()) onPartial(partial)
                         }
-                        onError(msg)
-                    }
-                })
-            }
 
-            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US")
-                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+                        override fun onResults(results: Bundle?) {
+                            val list = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                            val best = list?.firstOrNull().orEmpty().trim()
+                            if (best.isNotEmpty()) onFinal(best) else onError("No speech detected.")
+                        }
+
+                        override fun onError(error: Int) {
+                            val msg = when (error) {
+                                SpeechRecognizer.ERROR_AUDIO -> "Microphone audio error."
+                                SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Grant Microphone permission in Android Settings."
+                                SpeechRecognizer.ERROR_NO_MATCH -> "Did not catch that clearly—please try again."
+                                SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Listening timed out."
+                                else -> "Voice recognition unavailable right now."
+                            }
+                            onError(msg)
+                        }
+                    })
+                }
+
+                val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                    putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                    putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US")
+                    putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                    putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+                }
+                speechRecognizer?.startListening(intent)
+            }.onFailure {
+                onError("Could not start microphone listener on this device.")
             }
-            speechRecognizer?.startListening(intent)
         }
     }
 
@@ -191,23 +202,25 @@ class VoiceAssistantEngine(private val context: Context) {
                 AudioFormat.ENCODING_PCM_16BIT
             ).coerceAtLeast(chunkSamples * 2)
 
-            val track = AudioTrack.Builder()
-                .setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                        .build()
-                )
-                .setAudioFormat(
-                    AudioFormat.Builder()
-                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                        .setSampleRate(sampleRate)
-                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                        .build()
-                )
-                .setBufferSizeInBytes(minBuf)
-                .setTransferMode(AudioTrack.MODE_STREAM)
-                .build()
+            val track = runCatching {
+                AudioTrack.Builder()
+                    .setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                            .build()
+                    )
+                    .setAudioFormat(
+                        AudioFormat.Builder()
+                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                            .setSampleRate(sampleRate)
+                            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                            .build()
+                    )
+                    .setBufferSizeInBytes(minBuf)
+                    .setTransferMode(AudioTrack.MODE_STREAM)
+                    .build()
+            }.getOrNull() ?: return@launch
 
             runCatching { track.play() }
             var sampleOffset = 0L
@@ -254,23 +267,25 @@ class VoiceAssistantEngine(private val context: Context) {
                     val env = 1.0 - (i.toDouble() / count)
                     buf[i] = (sin(2.0 * PI * freq * i / sampleRate) * 7500 * env).toInt().toShort()
                 }
-                val track = AudioTrack.Builder()
-                    .setAudioAttributes(
-                        AudioAttributes.Builder()
-                            .setUsage(AudioAttributes.USAGE_ALARM)
-                            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                            .build()
-                    )
-                    .setAudioFormat(
-                        AudioFormat.Builder()
-                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                            .setSampleRate(sampleRate)
-                            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                            .build()
-                    )
-                    .setBufferSizeInBytes(buf.size * 2)
-                    .setTransferMode(AudioTrack.MODE_STATIC)
-                    .build()
+                val track = runCatching {
+                    AudioTrack.Builder()
+                        .setAudioAttributes(
+                            AudioAttributes.Builder()
+                                .setUsage(AudioAttributes.USAGE_ALARM)
+                                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                                .build()
+                        )
+                        .setAudioFormat(
+                            AudioFormat.Builder()
+                                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                                .setSampleRate(sampleRate)
+                                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                                .build()
+                        )
+                        .setBufferSizeInBytes(buf.size * 2)
+                        .setTransferMode(AudioTrack.MODE_STATIC)
+                        .build()
+                }.getOrNull() ?: continue
                 runCatching {
                     track.write(buf, 0, buf.size)
                     track.play()

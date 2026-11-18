@@ -52,8 +52,8 @@ object ShamiaPrompts {
                 ""
             }
             listOf(
-                "STRICT ACTIVE MODEL RULE: Do NOT use a generic default fallback or cached response. Process and generate this answer strictly as ${activeModel.name} (modelId=${activeModel.id}, backend=$backendTag, provider=${activeModel.provider}).",
-                "At the very beginning of your response, explicitly state the active model ID/version: \"[Model: ${activeModel.name} ($backendTag)]\" before answering.",
+                "System Instruction: Do not use the default fallback model or cached responses for this request. Process and generate the answer strictly using the currently selected active model (${activeModel.name} | ID: ${activeModel.id} | Backend: $backendTag).",
+                "At the very beginning of your response, explicitly state the exact model ID/version you are running on right now ([Model: ${activeModel.name} ($backendTag)]) before answering.",
                 styleNote
             ).filter { it.isNotEmpty() }.joinToString("\n")
         } else {

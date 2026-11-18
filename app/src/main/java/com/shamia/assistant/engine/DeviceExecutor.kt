@@ -83,7 +83,7 @@ object DeviceExecutor {
             }
 
             DeviceActionType.SET_BRIGHTNESS -> {
-                val pct = action.numericValue.coerceIn(25, 100)
+                val pct = action.numericValue.coerceIn(10, 100)
                 onControlsUpdated(currentControls.copy(brightnessPct = pct))
                 onBrightnessRequested(pct)
                 "Screen luminance adjusted to $pct%."

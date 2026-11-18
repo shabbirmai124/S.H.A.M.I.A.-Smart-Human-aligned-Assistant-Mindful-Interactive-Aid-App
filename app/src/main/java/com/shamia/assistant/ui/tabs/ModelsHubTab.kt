@@ -29,17 +29,13 @@ import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -77,12 +73,6 @@ fun ModelsHubTab(
     onSaveEndpointsAndTest: (ollamaUrl: String, serverUrl: String) -> Unit,
     onStartNewChatWithActiveModel: () -> Unit
 ) {
-    var customName by remember { mutableStateOf("") }
-    var customRepo by remember { mutableStateOf("") }
-    var customRam by remember { mutableStateOf("4") }
-    var ollamaInput by remember(state.ollamaEndpoint) { mutableStateOf(state.ollamaEndpoint) }
-    var serverInput by remember(state.serverBaseUrl) { mutableStateOf(state.serverBaseUrl) }
-
     val activeSpec = state.selectedModel
 
     LazyColumn(
@@ -111,7 +101,7 @@ fun ModelsHubTab(
                         }
                     }
                     Text(
-                        text = "RAM: ${state.hardware.ramGb} GB · Cores: ${state.hardware.cpuCores} · ${state.hardware.recommendedTier}",
+                        text = "RAM: ${state.hardware.ramGb} GB · Avail: ${state.hardware.availRamMb} MB · Cores: ${state.hardware.cpuCores} · ${state.hardware.recommendedTier}",
                         style = MaterialTheme.typography.bodySmall,
                         color = TextSecondary
                     )
@@ -284,13 +274,19 @@ fun ModelsHubTab(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
+                            val isRecommended = spec.id == state.recommendedModelId
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Icon(Icons.Filled.Memory, contentDescription = null, tint = SapphireBright, modifier = Modifier.size(16.dp))
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text(spec.name, style = MaterialTheme.typography.titleSmall, color = TextPrimary, fontWeight = FontWeight.SemiBold)
                             }
                             Text(
-                                text = "${spec.params} · ${if (safe) "Safe for Device" else "Needs ${spec.minRamGb} GB RAM"}",
+                                text = buildString {
+                                    append(spec.params)
+                                    append(" · ")
+                                    append(if (safe) "Safe for Device" else "Needs ${spec.minRamGb} GB RAM")
+                                    if (isRecommended) append(" · Recommended")
+                                },
                                 style = MaterialTheme.typography.labelSmall,
                                 color = if (safe) EmeraldOk else AmberWarn,
                                 modifier = Modifier.padding(top = 3.dp)
@@ -323,9 +319,10 @@ fun ModelsHubTab(
                         ) {
                             Text("New Chat", color = SapphireBright)
                         }
-                        if (!spec.isBuiltInOffline) {
+                        if (spec.supportsOfflineInstall) {
+                            val downloadInfo = state.modelDownloadProgress[spec.id]
                             OutlinedButton(
-                                onClick = { onToggleInstallModel(spec.id) },
+                                onClick = { if (downloadInfo == null) onToggleInstallModel(spec.id) },
                                 border = BorderStroke(1.dp, if (isInstalled) EmeraldOk else CardBorder),
                                 modifier = Modifier.testTag("install_offline_${spec.id}")
                             ) {
@@ -337,7 +334,11 @@ fun ModelsHubTab(
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text(
-                                    text = if (isInstalled) "Installed Offline" else "Install Offline",
+                                    text = when {
+                                        downloadInfo != null -> "Installing ${downloadInfo.first}%"
+                                        isInstalled -> "Installed Offline"
+                                        else -> "Install Offline"
+                                    },
                                     color = if (isInstalled) EmeraldOk else TextPrimary
                                 )
                             }
@@ -348,66 +349,91 @@ fun ModelsHubTab(
                             }
                         }
                     }
+                    state.modelDownloadProgress[spec.id]?.let { (pct, statusText) ->
+                        Spacer(modifier = Modifier.height(6.dp))
+                        LinearProgressIndicator(
+                            progress = { (pct.coerceIn(0, 100)) / 100f },
+                            color = SapphirePulse,
+                            trackColor = GraphiteSurface,
+                            modifier = Modifier.fillMaxWidth().height(5.dp)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "$statusText ($pct%)",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = SapphireBright
+                        )
+                    }
                 }
             }
         }
 
-        // Custom Model Loader
+        // 7. Offline Voice Models (STT & TTS)
         item {
-            Surface(shape = RoundedCornerShape(14.dp), color = CardSlate, border = BorderStroke(1.dp, CardBorder)) {
-                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("CUSTOM HUGGING FACE / OLLAMA MODEL", style = MaterialTheme.typography.labelMedium, color = SapphireBright)
-                    OutlinedTextField(value = customName, onValueChange = { customName = it }, label = { Text("Display Name (e.g. Qwen 3 1.7B)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(value = customRepo, onValueChange = { customRepo = it }, label = { Text("Ollama tag or HF repo") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(value = customRam, onValueChange = { customRam = it.filter { ch -> ch.isDigit() } }, label = { Text("Min RAM (GB)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                    Button(
-                        onClick = {
-                            if (customName.isNotBlank() && customRepo.isNotBlank()) {
-                                onAddCustomModel(customName, customRepo, customRam.toIntOrNull() ?: 4)
-                                customName = ""
-                                customRepo = ""
-                            }
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    ) { Text("Load & Activate Custom Model") }
-                }
-            }
-        }
-
-        // Offline Voice Models (STT / TTS)
-        item {
-            Text("OFFLINE VOICE PACKS (${ModelCatalog.VOICE_MODELS.size})", style = MaterialTheme.typography.labelMedium, color = SapphireBright, fontWeight = FontWeight.Bold)
+            Text(
+                text = "Offline Voice Models (STT & TTS)",
+                style = MaterialTheme.typography.titleSmall,
+                color = TextPrimary,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(top = 4.dp)
+            )
         }
         items(ModelCatalog.VOICE_MODELS, key = { it.id }) { voice ->
             val cached = state.installedVoiceIds.contains(voice.id)
+            val dl = state.voiceDownloadProgress[voice.id]
             Surface(shape = RoundedCornerShape(12.dp), color = CardSlate, border = BorderStroke(1.dp, CardBorder)) {
-                Row(modifier = Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(voice.name, style = MaterialTheme.typography.titleSmall, color = TextPrimary)
-                        Text("${voice.kind.name} · ${voice.sizeLabel} · ${voice.hfRepo}", style = MaterialTheme.typography.labelSmall, color = SapphireBright)
+                Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
+                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(voice.name, style = MaterialTheme.typography.titleSmall, color = TextPrimary)
+                            Text(
+                                text = "${voice.sizeLabel} · ${voice.hfRepo}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (cached) EmeraldOk else TextSecondary
+                            )
+                        }
+                        OutlinedButton(
+                            onClick = { if (dl == null) onToggleInstallVoice(voice.id) },
+                            border = BorderStroke(1.dp, if (cached) EmeraldOk else CardBorder),
+                            modifier = Modifier.testTag("install_voice_${voice.id}")
+                        ) {
+                            Text(
+                                text = when {
+                                    dl != null -> "${dl.first}%"
+                                    cached -> "Installed"
+                                    else -> "Install"
+                                },
+                                color = if (cached) EmeraldOk else TextPrimary
+                            )
+                        }
                     }
-                    OutlinedButton(onClick = { onToggleInstallVoice(voice.id) }) {
-                        Text(if (cached) "Ready" else "Install")
+                    if (dl != null) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        LinearProgressIndicator(
+                            progress = { (dl.first.coerceIn(0, 100)) / 100f },
+                            color = SapphirePulse,
+                            trackColor = GraphiteSurface,
+                            modifier = Modifier.fillMaxWidth().height(4.dp)
+                        )
+                        Text(dl.second, style = MaterialTheme.typography.labelSmall, color = SapphireBright, modifier = Modifier.padding(top = 3.dp))
                     }
                 }
             }
         }
 
-        // Termux Ollama & Server Test
+        // 8. Add Custom HF Model
         item {
-            Surface(shape = RoundedCornerShape(14.dp), color = CardSlate, border = BorderStroke(1.dp, CardBorder)) {
-                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("TERMUX OLLAMA & PAIRED SERVER", style = MaterialTheme.typography.labelMedium, color = SapphireBright)
-                    OutlinedTextField(value = ollamaInput, onValueChange = { ollamaInput = it }, label = { Text("Local Ollama URL") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(value = serverInput, onValueChange = { serverInput = it }, label = { Text("Optional Server URL") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                    Button(onClick = { onSaveEndpointsAndTest(ollamaInput, serverInput) }, modifier = Modifier.fillMaxWidth().testTag("test_ollama_button")) {
-                        Text("Save & Test Ollama")
-                    }
-                    if (state.ollamaTestStatus.isNotBlank()) {
-                        Text(state.ollamaTestStatus, style = MaterialTheme.typography.bodySmall, color = SapphireBright)
-                    }
-                }
-            }
+            AddCustomHfModelCard(onAddCustomModel = onAddCustomModel)
+        }
+
+        // 9. Local Ollama Endpoint
+        item {
+            LocalOllamaEndpointCard(
+                ollamaEndpoint = state.ollamaEndpoint,
+                serverBaseUrl = state.serverBaseUrl,
+                testStatus = state.ollamaTestStatus,
+                onSaveEndpointsAndTest = onSaveEndpointsAndTest
+            )
         }
     }
 }

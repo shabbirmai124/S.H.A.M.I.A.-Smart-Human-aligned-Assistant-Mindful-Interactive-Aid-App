@@ -2,6 +2,7 @@ package com.shamia.assistant.engine
 
 import com.shamia.assistant.model.CoachingTip
 import com.shamia.assistant.model.ConversationalIntent
+import com.shamia.assistant.model.OpenSourceModelSpec
 import com.shamia.assistant.model.RoutineItem
 import com.shamia.assistant.model.SyllabusItem
 import java.util.Locale
@@ -87,7 +88,8 @@ object OfflineCompanion {
         addressAs: String,
         fullName: String,
         routine: List<RoutineItem>,
-        syllabus: List<SyllabusItem>
+        syllabus: List<SyllabusItem>,
+        selectedModel: OpenSourceModelSpec? = null
     ): OfflineCompanionReply {
         val addr = addressAs.trim().ifEmpty { "Sir" }
         val owner = fullName.trim().ifEmpty { "Md Shabbir Mia" }
@@ -233,9 +235,10 @@ object OfflineCompanion {
             }
         }
 
+        val activeName = selectedModel?.name ?: "DeepSeek 2B · S.H.A.M.I.A. Offline Core"
         return OfflineCompanionReply(
             intent = ConversationalIntent.GENERAL,
-            text = "DeepSeek 2B · S.H.A.M.I.A. Offline Core standing by, $addr. Ask me about your daily routine, university syllabus, phone controls, 4nm/6nm phones, or switch on online search anytime."
+            text = "$activeName standing by offline, $addr. Ask about your routine, university syllabus, phone controls, or connect online / Termux Ollama to run full cloud & GGUF weights."
         )
     }
 }

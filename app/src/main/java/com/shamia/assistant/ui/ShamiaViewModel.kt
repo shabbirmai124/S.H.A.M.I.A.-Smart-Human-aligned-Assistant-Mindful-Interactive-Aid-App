@@ -8,10 +8,12 @@ import com.shamia.assistant.engine.DeviceExecutor
 import com.shamia.assistant.engine.DeviceTelemetryMonitor
 import com.shamia.assistant.engine.IntentEngine
 import com.shamia.assistant.engine.ModelCatalog
+import com.shamia.assistant.engine.ModelDownloadManager
 import com.shamia.assistant.engine.OfflineCompanion
 import com.shamia.assistant.engine.OpenSourceAiRepository
 import com.shamia.assistant.engine.RoutineSyllabusStore
 import com.shamia.assistant.engine.ShamiaPrompts
+import com.shamia.assistant.engine.ShamiaStateDelegates
 import com.shamia.assistant.engine.VoiceAssistantEngine
 import com.shamia.assistant.model.ActionStatus
 import com.shamia.assistant.model.AlarmItem
@@ -20,15 +22,11 @@ import com.shamia.assistant.model.CoreVisualState
 import com.shamia.assistant.model.DeviceActionType
 import com.shamia.assistant.model.HudMessage
 import com.shamia.assistant.model.MessageSource
-import com.shamia.assistant.model.NoteItem
 import com.shamia.assistant.model.OpenSourceModelSpec
 import com.shamia.assistant.model.PendingAction
 import com.shamia.assistant.model.PermissionCapability
 import com.shamia.assistant.model.PermissionPolicy
 import com.shamia.assistant.model.RoutineCategory
-import com.shamia.assistant.model.RoutineItem
-import com.shamia.assistant.model.SyllabusItem
-import com.shamia.assistant.model.TaskItem
 import com.shamia.assistant.model.UserIdentityProfile
 import com.shamia.assistant.model.VoiceGender
 import kotlinx.coroutines.Job
@@ -58,8 +56,13 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
         val controls = store.loadControls()
         val selectedModelId = store.loadSelectedModelId()
         val customModels = store.loadCustomModels()
-        val activeSpec = (ModelCatalog.CATALOG + customModels).find { it.id == selectedModelId }
-            ?: ModelCatalog.CATALOG.first()
+        val allModels = ModelCatalog.CATALOG + customModels
+        val recommended = ModelDownloadManager.recommendSafeDefaultModel(hardware, allModels)
+        val savedSpec = allModels.find { it.id == selectedModelId } ?: recommended
+        val oomSafeStart = if (hardware.isLowMemory && !savedSpec.isBuiltInOffline) recommended else savedSpec
+        val startBanner = if (oomSafeStart.id != savedSpec.id) {
+            "OOM Protection switched to ${oomSafeStart.name} for smooth performance."
+        } else null
         val initialSession = "session-${System.currentTimeMillis()}"
 
         val initialGender = VoiceGender.entries.firstOrNull { it.name == store.loadVoiceGender() } ?: VoiceGender.FEMALE
@@ -79,7 +82,8 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
                 customModels = customModels,
                 installedModelIds = store.loadInstalledModelIds(),
                 installedVoiceIds = store.loadInstalledVoiceIds(),
-                selectedModelId = activeSpec.id,
+                selectedModelId = oomSafeStart.id,
+                recommendedModelId = recommended.id,
                 voiceGender = initialGender,
                 showAllModels = store.loadShowAllModels(),
                 ensembleEnabled = store.loadEnsembleEnabled(),
@@ -87,7 +91,8 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
                 useResearch = store.loadUseResearch(),
                 ollamaEndpoint = store.loadOllamaEndpoint(),
                 serverBaseUrl = store.loadServerBaseUrl(),
-                messages = listOf(buildWelcomeMessage(identity, activeSpec, initialSession))
+                messages = listOf(buildWelcomeMessage(identity, oomSafeStart, initialSession)),
+                statusBanner = startBanner
             )
         }
 
@@ -133,7 +138,7 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun nowLabel(): String = SimpleDateFormat("hh:mm a", Locale.getDefault()).format(Date())
     private fun clockFormat(): String = SimpleDateFormat("EEE, MMM d · hh:mm:ss a", Locale.getDefault()).format(Date())
-    private fun appendMessage(msg: HudMessage) = _ui.update { it.copy(messages = it.messages + msg) }
+    private fun appendMessage(msg: HudMessage) = _ui.update { it.copy(messages = (it.messages + msg).takeLast(80)) }
 
     fun clearBanner() = _ui.update { it.copy(statusBanner = null) }
 
@@ -275,7 +280,7 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
 
             val (cleanText, extractedTip) = ShamiaPrompts.extractCoachingTip(result.replyText)
             val fallbackTip = if (extractedTip == null && intent == ConversationalIntent.ENGLISH_TUTOR) {
-                OfflineCompanion.generateReply(text, addr, _ui.value.identity.fullName, _ui.value.routine, _ui.value.syllabus).coachingTip
+                OfflineCompanion.generateReply(text, addr, _ui.value.identity.fullName, _ui.value.routine, _ui.value.syllabus, activeSpec).coachingTip
             } else extractedTip
 
             _ui.update { it.copy(coreState = CoreVisualState.IDLE) }
@@ -442,7 +447,11 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
     fun setVoiceGender(gender: VoiceGender) {
         store.saveVoiceGender(gender.name)
         voiceEngine.setVoiceGender(gender)
+        val addr = _ui.value.identity.addressAs.ifBlank { "Sir" }
         _ui.update { it.copy(voiceGender = gender, statusBanner = "Clear Natural Voice set to ${gender.label}.") }
+        if (_ui.value.voiceReplyEnabled) {
+            voiceEngine.speak("Clear ${gender.label.lowercase()} voice ready, $addr.")
+        }
     }
     fun toggleShowAllModels() {
         val next = !_ui.value.showAllModels
@@ -452,16 +461,11 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
     fun toggleWebResearch() = _ui.update { val next = !it.useResearch; store.saveUseResearch(next); it.copy(useResearch = next) }
     fun toggleEnsembleEnabled() = _ui.update { val next = !it.ensembleEnabled; store.saveEnsembleEnabled(next); it.copy(ensembleEnabled = next) }
 
-    fun toggleInstallModel(modelId: String) {
-        if (modelId == "offline-core") return
-        val next = _ui.value.installedModelIds.toMutableSet().apply { if (contains(modelId)) remove(modelId) else add(modelId) }
-        store.saveInstalledModelIds(next); _ui.update { it.copy(installedModelIds = next) }
-    }
+    fun toggleInstallModel(modelId: String) =
+        ShamiaStateDelegates.installOrRemoveModel(getApplication(), viewModelScope, _ui, store, modelId)
 
-    fun toggleInstallVoiceModel(voiceId: String) {
-        val next = _ui.value.installedVoiceIds.toMutableSet().apply { if (contains(voiceId)) remove(voiceId) else add(voiceId) }
-        store.saveInstalledVoiceIds(next); _ui.update { it.copy(installedVoiceIds = next) }
-    }
+    fun toggleInstallVoiceModel(voiceId: String) =
+        ShamiaStateDelegates.installOrRemoveVoice(getApplication(), viewModelScope, _ui, store, voiceId)
 
     fun addCustomModel(name: String, hfOrOllama: String, minRamGb: Int) {
         val cleanName = name.trim(); val cleanRepo = hfOrOllama.trim()
@@ -505,39 +509,18 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
         store.savePermission(cap, policy); _ui.update { it.copy(permissions = it.permissions + (cap to policy)) }
     }
 
-    fun addTask(title: String, highPriority: Boolean = false) {
-        if (title.isBlank()) return
-        val next = listOf(TaskItem("t-${System.currentTimeMillis()}", title.trim(), highPriority)) + _ui.value.tasks
-        store.saveTasks(next); _ui.update { it.copy(tasks = next) }
-    }
-
+    fun addTask(title: String, highPriority: Boolean = false) = ShamiaStateDelegates.addTask(_ui, store, title, highPriority)
     fun toggleTask(id: String) = _ui.update { val n = it.tasks.map { t -> if (t.id == id) t.copy(completed = !t.completed) else t }; store.saveTasks(n); it.copy(tasks = n) }
     fun deleteTask(id: String) = _ui.update { val n = it.tasks.filterNot { t -> t.id == id }; store.saveTasks(n); it.copy(tasks = n) }
     fun clearCompletedTasks() = _ui.update { val n = it.tasks.filterNot { t -> t.completed }; store.saveTasks(n); it.copy(tasks = n) }
-
-    fun addNote(content: String) {
-        if (content.isBlank()) return
-        val next = listOf(NoteItem("n-${System.currentTimeMillis()}", content.trim())) + _ui.value.notes
-        store.saveNotes(next); _ui.update { it.copy(notes = next) }
-    }
-
+    fun addNote(content: String) = ShamiaStateDelegates.addNote(_ui, store, content)
     fun deleteNote(id: String) = _ui.update { val n = it.notes.filterNot { m -> m.id == id }; store.saveNotes(n); it.copy(notes = n) }
-
-    fun addRoutine(timeLabel: String, title: String, category: RoutineCategory = RoutineCategory.STUDY) {
-        if (title.isBlank()) return
-        val next = _ui.value.routine + RoutineItem("r-${System.currentTimeMillis()}", timeLabel.ifBlank { "Anytime" }, title.trim(), category)
-        store.saveRoutine(next); _ui.update { it.copy(routine = next) }
-    }
-
+    fun addRoutine(timeLabel: String, title: String, category: RoutineCategory = RoutineCategory.STUDY) =
+        ShamiaStateDelegates.addRoutine(_ui, store, timeLabel, title, category)
     fun toggleRoutine(id: String) = _ui.update { val n = it.routine.map { r -> if (r.id == id) r.copy(completed = !r.completed) else r }; store.saveRoutine(n); it.copy(routine = n) }
     fun deleteRoutine(id: String) = _ui.update { val n = it.routine.filterNot { r -> r.id == id }; store.saveRoutine(n); it.copy(routine = n) }
-
-    fun addSyllabus(courseCode: String, courseTitle: String, topic: String, examNote: String = "") {
-        if (topic.isBlank()) return
-        val next = _ui.value.syllabus + SyllabusItem("s-${System.currentTimeMillis()}", courseCode.trim().ifBlank { "COURSE" }, courseTitle.trim().ifBlank { "Subject" }, topic.trim(), examNote.trim().takeIf { it.isNotEmpty() })
-        store.saveSyllabus(next); _ui.update { it.copy(syllabus = next) }
-    }
-
+    fun addSyllabus(courseCode: String, courseTitle: String, topic: String, examNote: String = "") =
+        ShamiaStateDelegates.addSyllabus(_ui, store, courseCode, courseTitle, topic, examNote)
     fun toggleSyllabus(id: String) = _ui.update { val n = it.syllabus.map { s -> if (s.id == id) s.copy(completed = !s.completed) else s }; store.saveSyllabus(n); it.copy(syllabus = n) }
     fun deleteSyllabus(id: String) = _ui.update { val n = it.syllabus.filterNot { s -> s.id == id }; store.saveSyllabus(n); it.copy(syllabus = n) }
 

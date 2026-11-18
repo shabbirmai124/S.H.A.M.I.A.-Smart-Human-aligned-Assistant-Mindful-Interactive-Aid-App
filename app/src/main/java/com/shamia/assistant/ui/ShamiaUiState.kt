@@ -1,6 +1,7 @@
 package com.shamia.assistant.ui
 
 import com.shamia.assistant.engine.ModelCatalog
+import com.shamia.assistant.engine.ModelDownloadManager
 import com.shamia.assistant.model.AlarmItem
 import com.shamia.assistant.model.AmbientTrack
 import com.shamia.assistant.model.CoreVisualState
@@ -21,7 +22,11 @@ import com.shamia.assistant.model.VoiceGender
 data class ShamiaUiState(
     val chatSessionId: String = "session-initial",
     val identity: UserIdentityProfile = UserIdentityProfile(),
-    val hardware: DeviceHardwareSpec = DeviceHardwareSpec(4, 8, "Android Device"),
+    val hardware: DeviceHardwareSpec = DeviceHardwareSpec(
+        ramGb = 4,
+        cpuCores = 8,
+        deviceLabel = "Android Device"
+    ),
     val telemetry: DeviceTelemetry = DeviceTelemetry(),
     val nowMillis: Long = System.currentTimeMillis(),
     val clockLabel: String = "",
@@ -33,11 +38,14 @@ data class ShamiaUiState(
     val showAllModels: Boolean = false,
     val useResearch: Boolean = true,
     val selectedModelId: String = "gemma-4-free",
+    val recommendedModelId: String = "offline-core",
     val ensembleEnabled: Boolean = false,
     val ensembleModelIds: List<String> = listOf("gemma-4-free", "qwen3-8b-chinese", "gpt-oss-20b-free"),
     val customModels: List<OpenSourceModelSpec> = emptyList(),
     val installedModelIds: Set<String> = setOf("offline-core"),
+    val modelDownloadProgress: Map<String, Pair<Int, String>> = emptyMap(),
     val installedVoiceIds: Set<String> = emptySet(),
+    val voiceDownloadProgress: Map<String, Pair<Int, String>> = emptyMap(),
     val ollamaEndpoint: String = "http://127.0.0.1:11434",
     val serverBaseUrl: String = "",
     val ollamaTestStatus: String = "",
@@ -59,7 +67,7 @@ data class ShamiaUiState(
         get() = ModelCatalog.CATALOG + customModels
 
     fun isModelSafeForDevice(spec: OpenSourceModelSpec): Boolean =
-        spec.isBuiltInOffline || hardware.ramGb >= spec.minRamGb || spec.sizeLabel.contains("Cloud", ignoreCase = true)
+        ModelDownloadManager.isSafeForLocalInstall(spec, hardware) || spec.sizeLabel.contains("Cloud", ignoreCase = true)
 
     val compatibleModels: List<OpenSourceModelSpec>
         get() = allModels.filter { isModelSafeForDevice(it) }

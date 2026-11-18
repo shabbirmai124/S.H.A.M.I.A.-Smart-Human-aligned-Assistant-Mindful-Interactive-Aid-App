@@ -32,7 +32,7 @@ class MainActivity : ComponentActivity() {
                     val pct = uiState.windowBrightnessPct
                     if (pct != null) {
                         val lp = window.attributes
-                        lp.screenBrightness = (pct / 100f).coerceIn(0.25f, 1.0f)
+                        lp.screenBrightness = (pct / 100f).coerceIn(0.10f, 1.0f)
                         window.attributes = lp
                     }
                 }
