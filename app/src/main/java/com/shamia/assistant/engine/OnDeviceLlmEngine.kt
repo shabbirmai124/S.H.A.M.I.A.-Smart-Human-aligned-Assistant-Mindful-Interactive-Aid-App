@@ -61,8 +61,8 @@ object OnDeviceLlmEngine {
 
     private const val TAG = "ShamiaOnDeviceLLM"
     private const val MIN_REAL_MODEL_BYTES = 10L * 1024L * 1024L
-    private const val MAX_GENERATION_TOTAL_MS = 95_000L
-    private const val MAX_TOKEN_STALL_MS = 28_000L
+    private const val MAX_GENERATION_TOTAL_MS = 110_000L
+    private const val MAX_TOKEN_STALL_MS = 38_000L
 
     private val engineDispatcher = Executors.newSingleThreadExecutor { r ->
         Thread(r, "shamia-local-llm").apply { isDaemon = true }
@@ -76,6 +76,7 @@ object OnDeviceLlmEngine {
     )
 
     private val bindingCache = ConcurrentHashMap<String, CachedBinding>()
+    private val gpuUnsupportedModels = ConcurrentHashMap.newKeySet<String>()
     private val mutex = Mutex()
 
     private val _runtimeState = MutableStateFlow(LlmRuntimeSnapshot())
@@ -87,8 +88,6 @@ object OnDeviceLlmEngine {
     private var loadedModelPath: String? = null
     @Volatile
     private var activeBackendLabel: String = "CPU"
-    @Volatile
-    private var gpuDelegateUnsupported: Boolean = HardwareOptimizer.isLikelyEmulator()
     @Volatile
     private var nativeLibUnavailable: Boolean = false
     private var llmInference: LlmInference? = null
@@ -182,19 +181,20 @@ object OnDeviceLlmEngine {
         return verified
     }
 
-    fun findAnyInstalledModelId(context: Context, preferredIds: List<String>): String? {
-        loadedModelId?.let { loaded ->
-            if (hasRealLocalWeights(context, loaded)) return loaded
-        }
-        for (id in preferredIds) {
-            if (id != "offline-core" && hasRealLocalWeights(context, id)) return id
+    fun scanAllInstalledModelIds(context: Context, catalogIds: List<String>): Set<String> {
+        val found = mutableSetOf("offline-core")
+        catalogIds.forEach { id ->
+            if (id != "offline-core" && hasRealLocalWeights(context, id)) {
+                found.add(id)
+            }
         }
         val modelsRoot = File(context.filesDir, "models")
-        val dirs = modelsRoot.listFiles()?.filter { it.isDirectory }.orEmpty()
-        for (dir in dirs) {
-            if (hasRealLocalWeights(context, dir.name)) return dir.name
+        modelsRoot.listFiles()?.filter { it.isDirectory }?.forEach { dir ->
+            if (hasRealLocalWeights(context, dir.name)) {
+                found.add(dir.name)
+            }
         }
-        return null
+        return found
     }
 
     fun findInstalledWeightsFile(context: Context, modelId: String): File? =
@@ -288,6 +288,7 @@ object OnDeviceLlmEngine {
 
     private fun tryCreateEngine(
         appContext: Context,
+        modelId: String,
         canonicalPath: String,
         attempt: InferenceLoadAttempt
     ): LlmInference? {
@@ -305,9 +306,9 @@ object OnDeviceLlmEngine {
             null
         } catch (t: Throwable) {
             if (attempt.backend == LlmInference.Backend.GPU) {
-                gpuDelegateUnsupported = true
+                gpuUnsupportedModels.add(modelId)
             }
-            Log.w(TAG, "Create engine failed (backend=${attempt.label}, maxTokens=${attempt.maxTokens}): ${t.message}")
+            Log.w(TAG, "Create engine failed for $modelId (backend=${attempt.label}, maxTokens=${attempt.maxTokens}): ${t.message}")
             null
         }
     }
@@ -327,7 +328,8 @@ object OnDeviceLlmEngine {
         }
 
         val appCtx = context.applicationContext
-        val plan = HardwareOptimizer.computeInferencePlan(appCtx, verified.file, gpuDelegateUnsupported)
+        val gpuBannedForThisModel = HardwareOptimizer.isLikelyEmulator() || gpuUnsupportedModels.contains(verified.modelId)
+        val plan = HardwareOptimizer.computeInferencePlan(appCtx, verified.file, gpuBannedForThisModel)
 
         // Release previous model first and hint GC if free RAM is tight before allocating native weights
         if (llmInference != null) {
@@ -344,7 +346,7 @@ object OnDeviceLlmEngine {
 
         for (attempt in plan.attempts) {
             if (nativeLibUnavailable) break
-            val created = tryCreateEngine(appCtx, canonicalPath, attempt)
+            val created = tryCreateEngine(appCtx, verified.modelId, canonicalPath, attempt)
             if (created != null) {
                 engine = created
                 chosenBackend = attempt.label
@@ -415,24 +417,20 @@ object OnDeviceLlmEngine {
                         return@withContext null
                     }
 
-                    onPhaseChanged?.invoke("Generating on $activeBackendLabel...")
+                    onPhaseChanged?.invoke("Generating on ${spec.name.substringBefore(" (")} ($activeBackendLabel)...")
                     val isSeq128 = verified.file.name.contains("seq128", ignoreCase = true)
 
-                    // Attempt 1: Clean natural prompt sized safely for the model's prefill window (no raw stop tokens)
+                    // Attempt 1: Clean natural prompt sized safely for the model's prefill window (works with MediaPipe bundles that inject prompt templates)
                     val cleanNaturalPrompt = buildNaturalPrompt(
                         history = history,
                         userPrompt = userPrompt,
                         webContext = webContext,
                         compactPrefill = isSeq128
                     )
-                    var finalReply = runStreamingSession(engine, cleanNaturalPrompt, onPartialResponse)
+                    var finalReply = runStreamingSession(engine, spec, cleanNaturalPrompt, onPartialResponse)
+                        ?.takeIf { isMeaningfulModelOutput(it, userPrompt) }
 
-                    // Attempt 2: Direct concise user prompt alone (guarantees prefill fits even on strict seq128 bundles)
-                    if (finalReply.isNullOrBlank() && !cancelledFlag.get() && cleanNaturalPrompt != userPrompt.take(280)) {
-                        finalReply = runStreamingSession(engine, userPrompt.take(280), onPartialResponse)
-                    }
-
-                    // Attempt 3: Model-family chat template (for .task bundles that don't inject their own template)
+                    // Attempt 2: Exact model-family chat template (Qwen/DeepSeek/SmolLM ChatML, Gemma, Llama, Phi, Nemotron)
                     if (finalReply.isNullOrBlank() && !cancelledFlag.get()) {
                         val formattedPrompt = buildCompactMobilePrompt(
                             spec = spec,
@@ -440,7 +438,14 @@ object OnDeviceLlmEngine {
                             userPrompt = if (isSeq128) userPrompt.take(220) else userPrompt,
                             webContext = if (isSeq128) "" else webContext
                         )
-                        finalReply = runStreamingSession(engine, formattedPrompt, onPartialResponse)
+                        finalReply = runStreamingSession(engine, spec, formattedPrompt, onPartialResponse)
+                            ?.takeIf { isMeaningfulModelOutput(it, userPrompt) }
+                    }
+
+                    // Attempt 3: Direct concise user prompt alone (guarantees prefill fits even on strict seq128 bundles)
+                    if (finalReply.isNullOrBlank() && !cancelledFlag.get() && cleanNaturalPrompt != userPrompt.take(280)) {
+                        finalReply = runStreamingSession(engine, spec, userPrompt.take(280), onPartialResponse)
+                            ?.takeIf { isMeaningfulModelOutput(it, userPrompt) }
                     }
 
                     // Attempt 4: Direct battle-tested synchronous engine.generateResponse() fallback
@@ -448,25 +453,28 @@ object OnDeviceLlmEngine {
                         finalReply = try {
                             val syncRaw = engine.generateResponse(userPrompt.take(280))
                             val cleaned = cleanRawTokens(syncRaw.orEmpty())
-                            if (cleaned.isNotBlank()) {
+                            if (isMeaningfulModelOutput(cleaned, userPrompt)) {
                                 onPartialResponse(cleaned)
                                 cleaned
                             } else null
                         } catch (t: Throwable) {
-                            Log.w(TAG, "Synchronous generateResponse fallback failed: ${t.message}")
+                            Log.w(TAG, "Synchronous generateResponse fallback failed for ${spec.id}: ${t.message}")
                             null
                         }
                     }
 
                     if (finalReply.isNullOrBlank()) null
-                    else VerifiedNativeOutput(
-                        text = finalReply,
-                        backendLabel = "On-Device ($activeBackendLabel)",
-                        verifiedModelId = spec.id,
-                        weightsFileName = verified.file.name,
-                        weightsSizeMb = verified.sizeMb,
-                        verificationProof = "file=${verified.file.name} · sha=${verified.fingerprint} · $activeBackendLabel"
-                    )
+                    else {
+                        Log.i(TAG, "STRICT LOCAL REPLY | modelId=${spec.id} | file=${verified.file.name} | backend=$activeBackendLabel | chars=${finalReply.length}")
+                        VerifiedNativeOutput(
+                            text = finalReply,
+                            backendLabel = "On-Device ($activeBackendLabel)",
+                            verifiedModelId = spec.id,
+                            weightsFileName = verified.file.name,
+                            weightsSizeMb = verified.sizeMb,
+                            verificationProof = "file=${verified.file.name} · sha=${verified.fingerprint} · $activeBackendLabel"
+                        )
+                    }
                 } finally {
                     generatingFlag.set(false)
                 }
@@ -474,21 +482,41 @@ object OnDeviceLlmEngine {
         }
     }
 
+    private fun isMeaningfulModelOutput(reply: String, userPrompt: String): Boolean {
+        val trimmed = reply.trim()
+        if (trimmed.length < 3) return false
+        if (!trimmed.any { it.isLetterOrDigit() }) return false
+        val normReply = trimmed.lowercase().replace(Regex("\\s+"), " ").trimEnd('.', '?', '!')
+        val normPrompt = userPrompt.trim().lowercase().replace(Regex("\\s+"), " ").trimEnd('.', '?', '!')
+        // Reject pure prompt echo so the engine retries with the model's explicit chat template
+        if (normReply == normPrompt) return false
+        return true
+    }
+
     private fun runStreamingSession(
         engine: LlmInference,
+        spec: OpenSourceModelSpec,
         prompt: String,
         onPartialResponse: (accumulatedText: String) -> Unit
     ): String? {
+        val idLower = spec.id.lowercase()
+        val temp = when {
+            idLower.contains("deepseek") -> 0.55f
+            idLower.contains("smollm") -> 0.55f
+            idLower.contains("qwen") -> 0.65f
+            idLower.contains("gemma") || idLower.contains("llama") -> 0.70f
+            else -> 0.62f
+        }
         val sessionOptions = LlmInferenceSession.LlmInferenceSessionOptions.builder()
             .setTopK(40)
             .setTopP(0.90f)
-            .setTemperature(0.60f)
+            .setTemperature(temp)
             .build()
 
         val session = try {
             LlmInferenceSession.createFromOptions(engine, sessionOptions)
         } catch (t: Throwable) {
-            Log.e(TAG, "Failed to create LlmInferenceSession", t)
+            Log.e(TAG, "Failed to create LlmInferenceSession for ${spec.id}", t)
             null
         } ?: return null
 

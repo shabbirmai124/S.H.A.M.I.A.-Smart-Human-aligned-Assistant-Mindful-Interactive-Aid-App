@@ -98,13 +98,25 @@ fun HudMessageCard(
                 style = MaterialTheme.typography.labelSmall,
                 color = TextSecondary
             )
-            if (!message.isUser && message.executionMeta?.verifiedExactModel == true) {
+            val activeModelLabel = message.modelLabel?.takeIf { it.isNotBlank() }
+            if (!message.isUser && activeModelLabel != null) {
+                val isVerified = message.executionMeta?.verifiedExactModel == true
                 Spacer(modifier = Modifier.width(6.dp))
-                Icon(
-                    imageVector = Icons.Filled.VerifiedUser,
-                    contentDescription = "Strictly verified active model response",
-                    tint = EmeraldOk,
-                    modifier = Modifier.size(13.dp)
+                if (isVerified) {
+                    Icon(
+                        imageVector = Icons.Filled.VerifiedUser,
+                        contentDescription = "Strictly verified active model response",
+                        tint = EmeraldOk,
+                        modifier = Modifier.size(13.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                }
+                Text(
+                    text = activeModelLabel,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (isVerified) EmeraldOk else AmberWarn,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
         }

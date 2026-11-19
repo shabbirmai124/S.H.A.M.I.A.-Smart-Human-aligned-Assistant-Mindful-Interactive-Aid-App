@@ -314,53 +314,44 @@ object OpenSourceAiRepository {
             resolvedBackendId = resolvedBackendId
         )
 
-        // 3. Priority 1: On-Device MediaPipe LiteRT Neural Weights for selected model (or any installed local model on disk while another downloads)
-        if (context != null) {
-            val targetLocalSpec = when {
-                verifiedLocal != null -> activeSpec
-                else -> {
-                    val anyInstalledId = OnDeviceLlmEngine.findAnyInstalledModelId(context, ModelCatalog.CATALOG.map { it.id })
-                    anyInstalledId?.let { id -> ModelCatalog.CATALOG.find { it.id == id } }
+        // 3. Priority 1: STRICT On-Device MediaPipe LiteRT Neural Weights for THIS EXACT selected model ONLY (zero cross-model substitution!)
+        if (context != null && verifiedLocal != null) {
+            OnDeviceLlmEngine.generateOfflineStream(
+                context = context,
+                spec = activeSpec,
+                systemInstruction = systemInstruction,
+                history = sameModelHistory,
+                userPrompt = prompt,
+                webContext = webSummary,
+                onPhaseChanged = onPhaseChanged,
+                onPartialResponse = { partial ->
+                    onStreamToken?.invoke(
+                        CloudModelResolver.sanitizeReplyForActiveModel(partial, activeSpec, identity, activeSpec.id)
+                    )
                 }
-            }
-            if (targetLocalSpec != null) {
-                OnDeviceLlmEngine.generateOfflineStream(
-                    context = context,
-                    spec = targetLocalSpec,
-                    systemInstruction = systemInstruction,
-                    history = sameModelHistory,
-                    userPrompt = prompt,
-                    webContext = webSummary,
-                    onPhaseChanged = onPhaseChanged,
-                    onPartialResponse = { partial ->
-                        onStreamToken?.invoke(
-                            CloudModelResolver.sanitizeReplyForActiveModel(partial, activeSpec, identity, targetLocalSpec.id)
+            )?.let { nativeOut ->
+                if (!isLowQualityOrBrokenReply(nativeOut.text) && nativeOut.verifiedModelId == activeSpec.id) {
+                    val cleanReply = CloudModelResolver.sanitizeReplyForActiveModel(
+                        nativeOut.text,
+                        activeSpec,
+                        identity,
+                        nativeOut.verifiedModelId
+                    )
+                    return ModelDispatchResult(
+                        replyText = cleanReply,
+                        source = if (links.isNotEmpty()) MessageSource.CLOUD_RESEARCH else MessageSource.OFFLINE_CORE,
+                        modelLabel = activeSpec.name,
+                        groundingLinks = links,
+                        executionMeta = ModelExecutionMeta(
+                            requestedModelId = activeSpec.id,
+                            requestedModelName = activeSpec.name,
+                            executedModelId = nativeOut.verifiedModelId,
+                            providerEngine = nativeOut.backendLabel,
+                            cacheBypassed = true,
+                            verifiedExactModel = true,
+                            verificationProof = nativeOut.verificationProof
                         )
-                    }
-                )?.let { nativeOut ->
-                    if (!isLowQualityOrBrokenReply(nativeOut.text)) {
-                        val cleanReply = CloudModelResolver.sanitizeReplyForActiveModel(
-                            nativeOut.text,
-                            activeSpec,
-                            identity,
-                            nativeOut.verifiedModelId
-                        )
-                        return ModelDispatchResult(
-                            replyText = cleanReply,
-                            source = if (links.isNotEmpty()) MessageSource.CLOUD_RESEARCH else MessageSource.OFFLINE_CORE,
-                            modelLabel = activeSpec.name,
-                            groundingLinks = links,
-                            executionMeta = ModelExecutionMeta(
-                                requestedModelId = activeSpec.id,
-                                requestedModelName = activeSpec.name,
-                                executedModelId = nativeOut.verifiedModelId,
-                                providerEngine = nativeOut.backendLabel,
-                                cacheBypassed = true,
-                                verifiedExactModel = nativeOut.verifiedModelId == activeSpec.id,
-                                verificationProof = nativeOut.verificationProof
-                            )
-                        )
-                    }
+                    )
                 }
             }
         }
@@ -390,7 +381,39 @@ object OpenSourceAiRepository {
             }
         }
 
-        // 5. Silent background fallback: never announce model status or blocked notices — answer the user's input directly!
+        // 5. Priority 3: Custom OpenAI-Compatible Backend Server (if configured in Models Hub) for THIS exact model
+        if (serverBaseUrl.isNotBlank() && isOnline) {
+            queryCustomOpenAiServerStrict(
+                serverBaseUrl = serverBaseUrl,
+                activeSpec = activeSpec,
+                prompt = prompt,
+                systemInstruction = systemInstruction,
+                history = sameModelHistory,
+                webContext = webSummary
+            )?.let { out ->
+                if (!isLowQualityOrBrokenReply(out.text)) {
+                    val cleanReply = CloudModelResolver.sanitizeReplyForActiveModel(out.text, activeSpec, identity, out.executedModel)
+                    return ModelDispatchResult(
+                        replyText = cleanReply,
+                        source = if (links.isNotEmpty()) MessageSource.CLOUD_RESEARCH else MessageSource.OLLAMA_LOCAL,
+                        modelLabel = activeSpec.name,
+                        groundingLinks = links,
+                        executionMeta = ModelExecutionMeta(
+                            requestedModelId = activeSpec.id,
+                            requestedModelName = activeSpec.name,
+                            executedModelId = out.executedModel,
+                            providerEngine = out.engineName,
+                            cacheBypassed = true,
+                            verifiedExactModel = true,
+                            verificationProof = out.proof
+                        )
+                    )
+                }
+            }
+        }
+
+        // 6. Selected open-weight model weights are not yet downloaded locally (or Ollama/server unreachable):
+        // Answer helpfully via Offline Core AND label the source honestly so the UI never pretends another model answered!
         val (effectiveWeb, effectiveLinks) = if (useResearch && webSummary.isNotBlank()) {
             webSummary to links
         } else if (isOnline && isDirectAnswerNeededFromWeb(prompt)) {
@@ -415,24 +438,106 @@ object OpenSourceAiRepository {
             rawText = "${directReply.text}$tipSuffix",
             activeSpec = activeSpec,
             identity = identity,
-            executedBackendId = activeSpec.id
+            executedBackendId = "offline-core"
         )
         val showLinks = if (useResearch) effectiveLinks else emptyList()
+        val shortTargetName = activeSpec.name.substringBefore(" (").trim()
+        val notDownloadedLabel = if (verifiedLocal == null) {
+            "Offline Core · Download $shortTargetName for its weights"
+        } else {
+            "Offline Core · $shortTargetName fallback"
+        }
         return ModelDispatchResult(
             replyText = cleanDirect,
             source = if (showLinks.isNotEmpty()) MessageSource.CLOUD_RESEARCH else MessageSource.OFFLINE_CORE,
-            modelLabel = activeSpec.name,
+            modelLabel = notDownloadedLabel,
             groundingLinks = showLinks,
             executionMeta = ModelExecutionMeta(
                 requestedModelId = activeSpec.id,
                 requestedModelName = activeSpec.name,
-                executedModelId = activeSpec.id,
-                providerEngine = "Local Offline",
+                executedModelId = "offline-core",
+                providerEngine = if (verifiedLocal == null) "Offline Core ($shortTargetName not downloaded)" else "Offline Core",
                 cacheBypassed = true,
                 verifiedExactModel = false,
-                verificationProof = "local-direct"
+                verificationProof = if (verifiedLocal == null) "weights-not-installed" else "engine-fallback"
             )
         )
+    }
+
+    /**
+     * Queries a user-configured OpenAI-compatible server (e.g. llama.cpp server, LM Studio, vLLM, or Ollama /v1)
+     * strictly requesting the exact selected model identifier.
+     */
+    private suspend fun queryCustomOpenAiServerStrict(
+        serverBaseUrl: String,
+        activeSpec: OpenSourceModelSpec,
+        prompt: String,
+        systemInstruction: String,
+        history: List<HudMessage>,
+        webContext: String
+    ): VerifiedOllamaOutput? = withContext(Dispatchers.IO) {
+        val base = serverBaseUrl.trimEnd('/')
+        if (base.isBlank()) return@withContext null
+        val endpoint = if (base.endsWith("/v1/chat/completions")) base
+        else if (base.endsWith("/v1")) "$base/chat/completions"
+        else "$base/v1/chat/completions"
+        val requestedModel = activeSpec.ollamaTag?.takeIf { it.isNotBlank() }
+            ?: activeSpec.hfInferenceModelId?.takeIf { it.isNotBlank() }
+            ?: activeSpec.id
+
+        val finalPrompt = if (webContext.isNotBlank()) {
+            "$prompt\n\n[Verified Web Search Context]:\n$webContext"
+        } else prompt
+
+        val msgs = JSONArray().apply {
+            put(JSONObject().put("role", "system").put("content", systemInstruction))
+            history.takeLast(6).forEach { turn ->
+                put(
+                    JSONObject()
+                        .put("role", if (turn.isUser) "user" else "assistant")
+                        .put("content", CloudModelResolver.stripHeaderFromHistoryText(turn.text))
+                )
+            }
+            put(JSONObject().put("role", "user").put("content", finalPrompt))
+        }
+
+        runCatching {
+            val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                doOutput = true
+                connectTimeout = 2500
+                readTimeout = 30000
+                setRequestProperty("Content-Type", "application/json")
+                setRequestProperty("Cache-Control", "no-cache, no-store")
+            }
+            val payload = JSONObject().apply {
+                put("model", requestedModel)
+                put("messages", msgs)
+                put("temperature", 0.65)
+                put("stream", false)
+            }
+            conn.outputStream.use { it.write(payload.toString().toByteArray()) }
+            val out = if (conn.responseCode in 200..299) {
+                val res = JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
+                val choices = res.optJSONArray("choices")
+                val content = choices?.optJSONObject(0)
+                    ?.optJSONObject("message")
+                    ?.optString("content")
+                    ?.trim()
+                    .orEmpty()
+                val echoed = res.optString("model").ifBlank { requestedModel }
+                if (content.isNotEmpty()) {
+                    VerifiedOllamaOutput(
+                        text = content,
+                        executedModel = echoed,
+                        engineName = "Verified Server ($echoed)",
+                        proof = "server=$echoed @ $base"
+                    )
+                } else null
+            } else null
+            conn.disconnect()
+            out
+        }.getOrNull()
     }
 
     suspend fun runEnsembleLocalAndWeb(

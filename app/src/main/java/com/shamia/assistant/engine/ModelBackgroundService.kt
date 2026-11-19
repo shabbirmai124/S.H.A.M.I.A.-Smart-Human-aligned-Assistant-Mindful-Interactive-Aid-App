@@ -32,6 +32,7 @@ import java.util.concurrent.ConcurrentHashMap
 data class BackgroundModelState(
     val downloadProgress: Map<String, Pair<Int, String>> = emptyMap(),
     val partialPercents: Map<String, Int> = emptyMap(),
+    val downloadErrors: Map<String, String> = emptyMap(),
     val newlyInstalledModelIds: Set<String> = emptySet(),
     val loadedInRamModelId: String? = null,
     val loadingInRamModelId: String? = null,
@@ -120,6 +121,7 @@ object ModelBackgroundHub {
         _state.update { cur ->
             cur.copy(
                 downloadProgress = cur.downloadProgress + (spec.id to (1 to "Starting background Turbo download...")),
+                downloadErrors = cur.downloadErrors - spec.id,
                 activeTaskLabel = "Downloading ${spec.name}",
                 activeTaskProgressPct = 1
             )
@@ -160,11 +162,17 @@ object ModelBackgroundHub {
                     } else if (partialPct != null) {
                         cur.partialPercents + (spec.id to partialPct)
                     } else {
-                        cur.partialPercents
+                        cur.partialPercents - spec.id
+                    }
+                    val nextErrors = if (ok) {
+                        cur.downloadErrors - spec.id
+                    } else {
+                        cur.downloadErrors + (spec.id to detailMessage)
                     }
                     cur.copy(
                         downloadProgress = cur.downloadProgress - spec.id,
                         partialPercents = nextPartials,
+                        downloadErrors = nextErrors,
                         newlyInstalledModelIds = nextInstalled
                     )
                 }
@@ -185,15 +193,17 @@ object ModelBackgroundHub {
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "Background download error for ${spec.id}", t)
+                val errMsg = t.message ?: "Download interrupted"
                 val partialPct = ModelDownloadManager.getPartialDownloadPercent(appCtx, spec.id)
                 _state.update { cur ->
                     val nextPartials = if (partialPct != null) cur.partialPercents + (spec.id to partialPct) else cur.partialPercents
                     cur.copy(
                         downloadProgress = cur.downloadProgress - spec.id,
-                        partialPercents = nextPartials
+                        partialPercents = nextPartials,
+                        downloadErrors = cur.downloadErrors + (spec.id to errMsg)
                     )
                 }
-                onFinished?.invoke(false, t.message ?: "Download interrupted")
+                onFinished?.invoke(false, errMsg)
             } finally {
                 activeDownloadJobs.remove(spec.id)
                 stopServiceIfIdle(appCtx)
@@ -267,6 +277,20 @@ object ModelBackgroundHub {
         ids.forEach { id -> pauseDownload(appCtx, id) }
     }
 
+    fun clearPartialDownload(context: Context, modelId: String) {
+        val appCtx = context.applicationContext
+        activeDownloadJobs.remove(modelId)?.cancel()
+        ModelDownloadManager.clearPartialDownload(appCtx, modelId)
+        _state.update { cur ->
+            cur.copy(
+                downloadProgress = cur.downloadProgress - modelId,
+                partialPercents = cur.partialPercents - modelId,
+                downloadErrors = cur.downloadErrors - modelId
+            )
+        }
+        stopServiceIfIdle(appCtx)
+    }
+
     fun markRemoved(modelId: String) {
         activeDownloadJobs.remove(modelId)?.cancel()
         synchronized(preloadLock) {
@@ -280,6 +304,7 @@ object ModelBackgroundHub {
             cur.copy(
                 downloadProgress = cur.downloadProgress - modelId,
                 partialPercents = cur.partialPercents - modelId,
+                downloadErrors = cur.downloadErrors - modelId,
                 newlyInstalledModelIds = cur.newlyInstalledModelIds - modelId
             )
         }

@@ -28,6 +28,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.FolderOpen
@@ -82,6 +83,7 @@ fun ModelsHubTab(
     onNewChatWithModel: (String) -> Unit,
     onToggleInstallModel: (String) -> Unit,
     onPauseModelDownload: (String) -> Unit,
+    onClearPartialDownload: (String) -> Unit,
     onPreloadModel: (String) -> Unit,
     onImportLocalModel: (String, Uri) -> Unit,
     onToggleInstallVoice: (String) -> Unit,
@@ -182,7 +184,7 @@ fun ModelsHubTab(
                         fontWeight = FontWeight.Medium
                     )
                     Text(
-                        text = "⚡ Turbo 8x Background Service · Adaptive RAM & Thermal Optimization Active",
+                        text = "⚡ Turbo Resumable Background Service · Adaptive RAM & Thermal Optimization Active",
                         style = MaterialTheme.typography.labelSmall,
                         color = SapphireBright,
                         fontWeight = FontWeight.Medium
@@ -547,6 +549,21 @@ fun ModelsHubTab(
                                     Spacer(modifier = Modifier.width(4.dp))
                                     Text("Pause", color = AmberWarn)
                                 }
+                            } else if (partialPct != null && !isInstalled) {
+                                OutlinedButton(
+                                    onClick = { onClearPartialDownload(spec.id) },
+                                    border = BorderStroke(1.dp, AmberWarn.copy(alpha = 0.7f)),
+                                    modifier = Modifier.testTag("reset_partial_${spec.id}")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.DeleteOutline,
+                                        contentDescription = "Clear partial download",
+                                        tint = AmberWarn,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Reset", color = AmberWarn)
+                                }
                             }
 
                             if (isInstalled) {
@@ -612,6 +629,13 @@ fun ModelsHubTab(
                             text = "$statusText ($pct%)",
                             style = MaterialTheme.typography.labelSmall,
                             color = SapphireBright
+                        )
+                    } ?: state.modelDownloadErrors[spec.id]?.takeIf { it.isNotBlank() }?.let { errText ->
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = errText,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = AmberWarn
                         )
                     }
                 }

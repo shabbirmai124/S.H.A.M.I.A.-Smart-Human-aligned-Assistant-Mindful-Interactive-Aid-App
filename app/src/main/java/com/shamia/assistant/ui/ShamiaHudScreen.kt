@@ -448,6 +448,7 @@ private fun WorkspaceTabContent(
             },
             onToggleInstallModel = vm::toggleInstallModel,
             onPauseModelDownload = vm::pauseModelDownload,
+            onClearPartialDownload = vm::clearPartialDownload,
             onPreloadModel = vm::preloadModelIntoRam,
             onImportLocalModel = vm::importLocalModelFile,
             onToggleInstallVoice = vm::toggleInstallVoiceModel,

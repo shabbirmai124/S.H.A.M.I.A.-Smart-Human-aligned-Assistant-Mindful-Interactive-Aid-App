@@ -56,6 +56,7 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
     val ui: StateFlow<ShamiaUiState> = _ui.asStateFlow()
 
     private var generationJob: Job? = null
+    private var modelSwitchJob: Job? = null
     private var streamingMessageId: String? = null
     private var lastFallbackVoiceDialog: (() -> Unit)? = null
 
@@ -77,9 +78,11 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
             val soundEnabled = store.loadInteractionSoundEnabled()
             voiceEngine.setInteractionSoundEnabled(soundEnabled)
 
-            val verifiedInstalled = (store.loadInstalledModelIds() + setOf("offline-core"))
-                .filter { id -> id == "offline-core" || OnDeviceLlmEngine.hasRealLocalWeights(application, id) }
-                .toSet()
+            val verifiedInstalled = OnDeviceLlmEngine.scanAllInstalledModelIds(
+                application,
+                allModels.map { it.id }
+            )
+            store.saveInstalledModelIds(verifiedInstalled)
             ModelBackgroundHub.syncInitialPartials(application, allModels.map { it.id })
             val bgNow = ModelBackgroundHub.state.value
 
@@ -99,6 +102,7 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
                     installedModelIds = verifiedInstalled + bgNow.newlyInstalledModelIds,
                     modelDownloadProgress = bgNow.downloadProgress,
                     partialDownloadPercents = bgNow.partialPercents,
+                    modelDownloadErrors = bgNow.downloadErrors,
                     loadedInRamModelId = bgNow.loadedInRamModelId,
                     loadingInRamModelId = bgNow.loadingInRamModelId,
                     loadedBackendLabel = bgNow.loadedBackendLabel,
@@ -156,6 +160,7 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
                         hardware = liveHw,
                         modelDownloadProgress = bg.downloadProgress,
                         partialDownloadPercents = bg.partialPercents,
+                        modelDownloadErrors = bg.downloadErrors,
                         installedModelIds = cur.installedModelIds + bg.newlyInstalledModelIds,
                         loadedInRamModelId = bg.loadedInRamModelId,
                         loadingInRamModelId = bg.loadingInRamModelId,
@@ -256,14 +261,16 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
         OnDeviceLlmEngine.cancelGeneration()
         generationJob?.cancel()
         generationJob = null
+        modelSwitchJob?.cancel()
         streamingMessageId = null
         voiceEngine.stopSpeaking()
         val chosen = _ui.value.allModels.find { it.id == modelId } ?: _ui.value.selectedModel
         store.saveSelectedModelId(chosen.id)
         ModelBackgroundHub.cancelStalePreload(exceptModelId = chosen.id)
-        viewModelScope.launch(Dispatchers.IO) {
+        val hasLocalWeights = chosen.isBuiltInOffline || OnDeviceLlmEngine.hasRealLocalWeights(getApplication(), chosen.id)
+        modelSwitchJob = viewModelScope.launch(Dispatchers.IO) {
             OnDeviceLlmEngine.unloadIfDifferent(chosen.id)
-            if (!chosen.isBuiltInOffline && OnDeviceLlmEngine.hasRealLocalWeights(getApplication(), chosen.id)) {
+            if (!chosen.isBuiltInOffline && hasLocalWeights) {
                 ShamiaStateDelegates.preloadModelIntoRam(getApplication(), _ui, chosen.id)
             }
         }
@@ -272,36 +279,53 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
             it.copy(
                 chatSessionId = freshSession,
                 selectedModelId = chosen.id,
+                installedModelIds = if (hasLocalWeights) it.installedModelIds + chosen.id else it.installedModelIds,
                 isGenerating = false,
                 coreState = CoreVisualState.IDLE,
                 liveTranscript = "",
                 messages = listOf(buildWelcomeMessage(it.identity, chosen, freshSession)),
-                statusBanner = null
+                statusBanner = if (!hasLocalWeights) "${chosen.name} is not downloaded yet — open Models to download its weights." else null
             )
         }
     }
 
     fun selectModel(modelId: String) {
         val chosen = _ui.value.allModels.find { it.id == modelId } ?: return
+        OnDeviceLlmEngine.cancelGeneration()
+        generationJob?.cancel()
+        generationJob = null
+        modelSwitchJob?.cancel()
+        streamingMessageId = null
+        voiceEngine.stopSpeaking()
         store.saveSelectedModelId(chosen.id)
         ModelBackgroundHub.cancelStalePreload(exceptModelId = chosen.id)
-        viewModelScope.launch(Dispatchers.IO) {
+        val hasLocalWeights = chosen.isBuiltInOffline || OnDeviceLlmEngine.hasRealLocalWeights(getApplication(), chosen.id)
+        modelSwitchJob = viewModelScope.launch(Dispatchers.IO) {
             OnDeviceLlmEngine.unloadIfDifferent(chosen.id)
-            if (!chosen.isBuiltInOffline && OnDeviceLlmEngine.hasRealLocalWeights(getApplication(), chosen.id)) {
+            if (!chosen.isBuiltInOffline && hasLocalWeights) {
                 ShamiaStateDelegates.preloadModelIntoRam(getApplication(), _ui, chosen.id)
             }
         }
-        Log.i("ShamiaModelRouter", "MODEL SWITCH -> id=${chosen.id}, name=${chosen.name}")
+        Log.i("ShamiaModelRouter", "MODEL SWITCH -> id=${chosen.id}, name=${chosen.name}, hasLocalWeights=$hasLocalWeights")
         _ui.update { state ->
             val updatedMessages = if (state.messages.size == 1 && state.messages.first().id.startsWith("welcome-")) {
                 listOf(buildWelcomeMessage(state.identity, chosen, state.chatSessionId))
             } else {
                 state.messages
             }
+            val switchBanner = when {
+                chosen.isBuiltInOffline -> null
+                !hasLocalWeights -> "${chosen.name} is not downloaded yet — download it in Models Hub for authentic responses."
+                OnDeviceLlmEngine.isModelHotInRam(chosen.id) -> "${chosen.name} ready in RAM."
+                else -> "Switched to ${chosen.name} — loading local weights..."
+            }
             state.copy(
                 selectedModelId = chosen.id,
+                installedModelIds = if (hasLocalWeights) state.installedModelIds + chosen.id else state.installedModelIds,
+                isGenerating = false,
+                coreState = CoreVisualState.IDLE,
                 messages = updatedMessages,
-                statusBanner = null
+                statusBanner = switchBanner
             )
         }
     }
@@ -405,14 +429,19 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
         )
         _ui.update { it.copy(coreState = CoreVisualState.THINKING, isGenerating = true) }
 
-        // Quietly auto-download & preload direct ungated weights in background if not yet installed (no popups or status text!)
-        val isDirectUngated = !activeSpec.isBuiltInOffline &&
+        // Only silently auto-download compact (<= 550 MB) ungated models when generous free storage (>= 2 GB) is available
+        // so large 1.5 GB+ models never fill up phone storage unexpectedly in the background.
+        val isCompactDirectUngated = !activeSpec.isBuiltInOffline &&
+            activeSpec.minRamGb <= 2 &&
             activeSpec.hfRepo?.startsWith("litert-community/", ignoreCase = true) == true &&
             !activeSpec.id.contains("gemma") && !activeSpec.id.contains("llama")
-        if (isDirectUngated &&
+        val hasGenerousStorage = getApplication<Application>().filesDir.usableSpace >= 2_000_000_000L
+        if (isCompactDirectUngated &&
+            hasGenerousStorage &&
             state.telemetry.isOnline &&
             !state.installedModelIds.contains(activeSpec.id) &&
             !state.modelDownloadProgress.containsKey(activeSpec.id) &&
+            !state.modelDownloadErrors.containsKey(activeSpec.id) &&
             ModelDownloadManager.isSafeForLocalInstall(activeSpec, state.hardware)
         ) {
             ShamiaStateDelegates.installOrRemoveModel(
@@ -819,6 +848,9 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
 
     fun pauseModelDownload(modelId: String) =
         ShamiaStateDelegates.pauseModelDownload(getApplication(), modelId)
+
+    fun clearPartialDownload(modelId: String) =
+        ShamiaStateDelegates.clearPartialModelDownload(getApplication(), _ui, modelId)
 
     fun preloadModelIntoRam(modelId: String) {
         val chosen = _ui.value.allModels.find { it.id == modelId } ?: return

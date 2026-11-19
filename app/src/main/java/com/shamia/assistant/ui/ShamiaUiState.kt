@@ -51,6 +51,7 @@ data class ShamiaUiState(
     val installedModelIds: Set<String> = setOf("offline-core"),
     val modelDownloadProgress: Map<String, Pair<Int, String>> = emptyMap(),
     val partialDownloadPercents: Map<String, Int> = emptyMap(),
+    val modelDownloadErrors: Map<String, String> = emptyMap(),
     val loadedInRamModelId: String? = null,
     val loadingInRamModelId: String? = null,
     val loadedBackendLabel: String = "",

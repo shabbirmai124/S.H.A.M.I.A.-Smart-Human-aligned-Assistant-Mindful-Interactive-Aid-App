@@ -32,6 +32,22 @@ internal object ShamiaStateDelegates {
         ModelBackgroundHub.pauseDownload(app, modelId)
     }
 
+    fun clearPartialModelDownload(
+        app: Application,
+        ui: MutableStateFlow<ShamiaUiState>,
+        modelId: String
+    ) {
+        ModelBackgroundHub.clearPartialDownload(app, modelId)
+        val name = ui.value.allModels.find { it.id == modelId }?.name ?: modelId
+        ui.update { cur ->
+            cur.copy(
+                partialDownloadPercents = cur.partialDownloadPercents - modelId,
+                modelDownloadErrors = cur.modelDownloadErrors - modelId,
+                statusBanner = "Cleared partial download for $name."
+            )
+        }
+    }
+
     fun installOrRemoveModel(
         app: Application,
         scope: CoroutineScope,

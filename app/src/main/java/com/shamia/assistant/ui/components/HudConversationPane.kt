@@ -358,7 +358,20 @@ fun HudConversationPane(
                             onDismissRequest = onDismissModelDropdown,
                             modifier = Modifier.background(CardSlate)
                         ) {
-                            state.allModels.forEach { spec ->
+                            val orderedModels = state.allModels.sortedWith(
+                                compareBy(
+                                    { spec ->
+                                        when {
+                                            state.loadedInRamModelId == spec.id -> 0
+                                            state.installedModelIds.contains(spec.id) && !spec.isBuiltInOffline -> 1
+                                            spec.isBuiltInOffline -> 2
+                                            state.isModelSafeForDevice(spec) -> 3
+                                            else -> 4
+                                        }
+                                    }
+                                )
+                            )
+                            orderedModels.forEach { spec ->
                                 val isSelected = spec.id == state.selectedModelId
                                 val isSafe = state.isModelSafeForDevice(spec)
                                 val isInstalled = state.installedModelIds.contains(spec.id)
@@ -377,8 +390,8 @@ fun HudConversationPane(
                                                     isHot -> "${spec.sizeLabel} · Ready in RAM (${state.loadedBackendLabel.ifBlank { "CPU" }})"
                                                     isLoading -> "${spec.sizeLabel} · Loading into RAM..."
                                                     spec.isBuiltInOffline -> "0 MB Built-In · Instant Offline"
-                                                    isInstalled -> "${spec.sizeLabel} · Downloaded Offline"
-                                                    isSafe -> "${spec.sizeLabel} · ${spec.params} · Local Hardware Ready"
+                                                    isInstalled -> "${spec.sizeLabel} · Downloaded Locally · Ready"
+                                                    isSafe -> "${spec.sizeLabel} · Not downloaded (open Models tab)"
                                                     else -> "${spec.sizeLabel} · Needs ${spec.minRamGb} GB RAM"
                                                 },
                                                 style = MaterialTheme.typography.labelSmall,

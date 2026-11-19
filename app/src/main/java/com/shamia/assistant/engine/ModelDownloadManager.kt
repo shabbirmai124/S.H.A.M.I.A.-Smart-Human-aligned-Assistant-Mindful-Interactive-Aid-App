@@ -23,7 +23,6 @@ import java.io.RandomAccessFile
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
-import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
@@ -32,13 +31,13 @@ import java.util.concurrent.atomic.AtomicReference
 object ModelDownloadManager {
 
     private const val TAG = "ShamiaTurboDownloader"
-    private const val USER_AGENT = "SHAMIA-Android-OfflineAI/2.0"
-    private const val TURBO_STREAMS = 8
-    private const val CHUNK_SIZE_LARGE = 4L * 1024L * 1024L // 4 MB dynamic work-stealing chunks
-    private const val CHUNK_SIZE_SMALL = 2L * 1024L * 1024L // 2 MB chunks for smaller bundles
+    private const val USER_AGENT = "SHAMIA-Android-OfflineAI/2.1"
+    private const val TURBO_STREAMS = 3 // 3 balanced streams avoid HF XetHub/CloudFront HTTP 429 & mobile NAT socket exhaustion
+    private const val CHUNK_SIZE_DEFAULT = 2L * 1024L * 1024L // 2 MB chunks for fast checkpointing & low rollback cost
     private const val IO_BUFFER_BYTES = 256 * 1024 // 256 KB socket buffer
     private const val IMPORT_BUFFER_BYTES = 512 * 1024 // 512 KB local copy buffer
     private const val MIN_REAL_MODEL_BYTES = 10L * 1024L * 1024L
+    private const val STORAGE_SAFETY_MARGIN_BYTES = 48L * 1024L * 1024L // 48 MB OS headroom
 
     private data class CachedDiscovery(
         val fileName: String,
@@ -102,6 +101,116 @@ object ModelDownloadManager {
     }
 
     /**
+     * Discards a model's partial `.part` file & checkpoint so the user can reclaim storage or restart cleanly.
+     */
+    fun clearPartialDownload(context: Context, modelId: String) {
+        runCatching {
+            val dir = File(context.filesDir, "models/$modelId")
+            File(dir, "model.task.part").delete()
+            File(dir, "download_checkpoint.json").delete()
+        }
+    }
+
+    /**
+     * Checks usable internal storage and safely clears temporary cache + orphaned partial downloads
+     * from *other* models (never deleting completed models) if free space is tight.
+     */
+    private fun reclaimDownloadSpaceIfNeeded(
+        context: Context,
+        excludeModelId: String,
+        neededBytes: Long
+    ): Long {
+        val modelsRoot = File(context.filesDir, "models").apply { mkdirs() }
+        var usable = modelsRoot.usableSpace
+        if (usable >= neededBytes) return usable
+
+        // 1. Clean app cacheDir temporary files
+        runCatching {
+            context.cacheDir?.listFiles()?.forEach { f ->
+                runCatching { f.deleteRecursively() }
+            }
+        }
+        usable = modelsRoot.usableSpace
+        if (usable >= neededBytes) return usable
+
+        // 2. Clean abandoned .part / checkpoint files from OTHER models (never completed weights)
+        runCatching {
+            modelsRoot.listFiles()?.forEach { modelDir ->
+                if (modelDir.isDirectory && modelDir.name != excludeModelId) {
+                    val orphanPart = File(modelDir, "model.task.part")
+                    val orphanCp = File(modelDir, "download_checkpoint.json")
+                    if (orphanPart.exists()) {
+                        Log.i(TAG, "Reclaiming storage from abandoned partial download in ${modelDir.name}")
+                        orphanPart.delete()
+                        orphanCp.delete()
+                    }
+                }
+            }
+        }
+        return modelsRoot.usableSpace
+    }
+
+    private fun isOutOfSpaceError(t: Throwable?): Boolean {
+        var cur: Throwable? = t
+        while (cur != null) {
+            val msg = cur.message?.lowercase().orEmpty()
+            if (msg.contains("enospc") ||
+                msg.contains("no space left") ||
+                msg.contains("not enough space") ||
+                msg.contains("disk full")
+            ) {
+                return true
+            }
+            cur = cur.cause
+        }
+        return false
+    }
+
+    /**
+     * Opens an HTTP GET connection and manually follows up to 8 redirects while strictly
+     * preserving Range, User-Agent, and Accept-Encoding headers across cross-host CDN hops
+     * (Android's default HttpURLConnection can drop Range headers or refuse cross-host redirects).
+     */
+    private fun openRangeConnection(
+        initialUrl: String,
+        rangeHeader: String?,
+        connectTimeoutMs: Int,
+        readTimeoutMs: Int
+    ): HttpURLConnection {
+        var currentUrl = initialUrl
+        var redirects = 0
+        while (true) {
+            val conn = (URL(currentUrl).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                instanceFollowRedirects = false
+                connectTimeout = connectTimeoutMs
+                readTimeout = readTimeoutMs
+                useCaches = false
+                setRequestProperty("User-Agent", USER_AGENT)
+                setRequestProperty("Accept-Encoding", "identity")
+                setRequestProperty("Connection", "keep-alive")
+                if (!rangeHeader.isNullOrBlank()) {
+                    setRequestProperty("Range", rangeHeader)
+                }
+            }
+            val code = conn.responseCode
+            if (code in listOf(301, 302, 303, 307, 308) && redirects < 8) {
+                val loc = conn.getHeaderField("Location")
+                if (loc.isNullOrBlank()) return conn
+                conn.disconnect()
+                currentUrl = if (loc.startsWith("http://", true) || loc.startsWith("https://", true)) {
+                    loc
+                } else {
+                    URL(URL(currentUrl), loc).toString()
+                }
+                redirects++
+            } else {
+                return conn
+            }
+        }
+    }
+
+    /**
      * Queries the official Hugging Face Hub API to locate the fastest-downloading, smallest
      * official quantized .task weight bundle inside the exact model's repository.
      */
@@ -113,8 +222,8 @@ object ModelDownloadManager {
         return runCatching {
             val apiUrl = URL("https://huggingface.co/api/models/$repo/tree/main")
             val conn = (apiUrl.openConnection() as HttpURLConnection).apply {
-                connectTimeout = 5000
-                readTimeout = 8000
+                connectTimeout = 7000
+                readTimeout = 10000
                 setRequestProperty("User-Agent", USER_AGENT)
                 setRequestProperty("Accept-Encoding", "identity")
             }
@@ -172,47 +281,30 @@ object ModelDownloadManager {
      * using `Range: bytes=0-0` (more reliable than HEAD across Hugging Face & CloudFront CDNs).
      */
     private fun resolveAndProbeTarget(initialUrl: String, fallbackExpectedBytes: Long): ResolvedTarget {
-        var currentUrl = initialUrl
-        var redirects = 0
         var conn: HttpURLConnection? = null
         try {
-            while (redirects < 8) {
-                conn = (URL(currentUrl).openConnection() as HttpURLConnection).apply {
-                    requestMethod = "GET"
-                    instanceFollowRedirects = false
-                    connectTimeout = 8000
-                    readTimeout = 10000
-                    setRequestProperty("User-Agent", USER_AGENT)
-                    setRequestProperty("Range", "bytes=0-0")
-                    setRequestProperty("Accept-Encoding", "identity")
-                    setRequestProperty("Connection", "keep-alive")
-                }
-                val code = conn.responseCode
-                if (code in 301..308) {
-                    val loc = conn.getHeaderField("Location") ?: break
-                    conn.disconnect()
-                    currentUrl = if (loc.startsWith("http")) loc else URL(URL(currentUrl), loc).toString()
-                    redirects++
-                } else {
-                    break
-                }
-            }
-            val active = conn ?: return ResolvedTarget(currentUrl, fallbackExpectedBytes, false, 0)
-            val code = active.responseCode
-            val contentRange = active.getHeaderField("Content-Range") // e.g., "bytes 0-0/554829104"
-            val acceptRanges = active.getHeaderField("Accept-Ranges")
+            conn = openRangeConnection(
+                initialUrl = initialUrl,
+                rangeHeader = "bytes=0-0",
+                connectTimeoutMs = 10000,
+                readTimeoutMs = 12000
+            )
+            val code = conn.responseCode
+            val resolvedUrl = conn.url?.toString() ?: initialUrl
+            val contentRange = conn.getHeaderField("Content-Range") // e.g., "bytes 0-0/554829104"
+            val acceptRanges = conn.getHeaderField("Accept-Ranges")
             val rangeTotal = contentRange?.substringAfterLast("/")?.toLongOrNull()
-            val contentLen = active.contentLengthLong.takeIf { it > 1L }
+            val contentLen = conn.contentLengthLong.takeIf { it > 1L }
             val totalBytes = rangeTotal ?: contentLen ?: fallbackExpectedBytes
             val supportsRange = (code == 206 && totalBytes > 0L) ||
                 (acceptRanges?.equals("bytes", ignoreCase = true) == true && totalBytes > 0L)
-            runCatching { active.inputStream.close() }
-            active.disconnect()
-            return ResolvedTarget(currentUrl, totalBytes, supportsRange, code)
+            runCatching { conn.inputStream.close() }
+            conn.disconnect()
+            return ResolvedTarget(resolvedUrl, totalBytes, supportsRange, code)
         } catch (e: Exception) {
             runCatching { conn?.disconnect() }
             Log.w(TAG, "Probe failed, falling back to direct stream: ${e.message}")
-            return ResolvedTarget(currentUrl, fallbackExpectedBytes, false, 0)
+            return ResolvedTarget(initialUrl, fallbackExpectedBytes, false, 0)
         }
     }
 
@@ -278,7 +370,7 @@ object ModelDownloadManager {
             }
         }
 
-        // 2. Turbo 8x Parallel Chunked + Resumable Download from official Hugging Face repository
+        // 2. Turbo Parallel Chunked + Resumable Download from official Hugging Face repository
         val repo = spec.hfRepo
         val dir = File(context.filesDir, "models/${spec.id}").apply { mkdirs() }
         if (!repo.isNullOrBlank()) {
@@ -293,6 +385,8 @@ object ModelDownloadManager {
                 val finalFile = File(dir, fileName.substringAfterLast("/"))
 
                 val dlResult = turboDownloadFile(
+                    context = context,
+                    modelId = spec.id,
                     initialUrl = downloadUrl,
                     fileName = fileName,
                     partFile = partFile,
@@ -310,7 +404,7 @@ object ModelDownloadManager {
                             .put("id", spec.id)
                             .put("name", spec.name)
                             .put("hfRepo", repo)
-                            .put("source", "huggingface_turbo_8x")
+                            .put("source", "huggingface_turbo")
                             .put("weightsFile", finalFile.name)
                             .put("bytes", finalFile.length())
                             .put("sha256Prefix", fingerprint)
@@ -325,7 +419,7 @@ object ModelDownloadManager {
                     return@withContext false to dlResult.second
                 }
             } else {
-                return@withContext false to "${spec.name} does not host a public ungated .task bundle on Hugging Face. Tap 'Import .task' to load local weights, or pull '${spec.ollamaTag}' in local Ollama."
+                return@withContext false to "${spec.name} could not be located on Hugging Face right now. Check internet and tap Retry, or tap 'Import .task'."
             }
         }
 
@@ -345,6 +439,8 @@ object ModelDownloadManager {
     }
 
     private suspend fun turboDownloadFile(
+        context: Context,
+        modelId: String,
         initialUrl: String,
         fileName: String,
         partFile: File,
@@ -356,7 +452,7 @@ object ModelDownloadManager {
     ): Pair<Boolean, String> {
         val target = resolveAndProbeTarget(initialUrl, expectedBytes)
         if (target.statusCode == 401 || target.statusCode == 403) {
-            return false to "Gated model on Hugging Face (${target.statusCode}). Download an ungated Turbo model like SmolLM 135M (175 MB) or Qwen 2.5 0.5B (529 MB), or import a local .task file."
+            return false to "Gated model on Hugging Face (${target.statusCode}). Download SmolLM 135M (175 MB) or Qwen 2.5 0.5B (529 MB), or import a local .task file."
         }
         if (target.statusCode !in listOf(0, 200, 206)) {
             return false to "Download server returned HTTP ${target.statusCode}. Check internet and tap Retry."
@@ -364,6 +460,13 @@ object ModelDownloadManager {
 
         val totalBytes = target.totalBytes.takeIf { it > 0L } ?: expectedBytes
         if (!target.supportsRange || totalBytes < 12L * 1024L * 1024L) {
+            val neededWithMargin = totalBytes + STORAGE_SAFETY_MARGIN_BYTES
+            val usable = reclaimDownloadSpaceIfNeeded(context, modelId, neededWithMargin)
+            if (usable in 1 until neededWithMargin) {
+                val freeMb = usable / (1024L * 1024L)
+                val needMb = (totalBytes / (1024L * 1024L)).coerceAtLeast(1L)
+                return false to "Low phone storage ($freeMb MB free, need $needMb MB). Free space or try SmolLM 135M (175 MB) / Qwen 2.5 0.5B (529 MB)."
+            }
             return singleStreamFastDownload(
                 urlStr = target.finalUrl,
                 partFile = partFile,
@@ -374,56 +477,88 @@ object ModelDownloadManager {
             )
         }
 
-        val chunkSize = if (totalBytes >= 120L * 1024L * 1024L) CHUNK_SIZE_LARGE else CHUNK_SIZE_SMALL
-        val totalChunks = ((totalBytes + chunkSize - 1L) / chunkSize).toInt().coerceAtLeast(1)
-        val workerCount = TURBO_STREAMS.coerceAtMost(totalChunks)
-
-        // Load existing checkpoint if file name & total size match (instant resume!)
-        val completedSet = Collections.synchronizedSet(mutableSetOf<Int>())
+        // Preserve chunk size from an existing matching checkpoint so 90% partial downloads resume seamlessly without losing progress!
+        val completedSet = ConcurrentHashMap.newKeySet<Int>()
+        var chunkSize = CHUNK_SIZE_DEFAULT
         val canResume = partFile.isFile && partFile.length() == totalBytes && checkpointFile.isFile
         if (canResume) {
             runCatching {
                 val cp = JSONObject(checkpointFile.readText())
+                val savedChunkSize = cp.optLong("chunkSize", 0L)
                 if (cp.optString("fileName") == fileName &&
                     cp.optLong("totalBytes") == totalBytes &&
-                    cp.optLong("chunkSize") == chunkSize
+                    savedChunkSize in (512L * 1024L)..(8L * 1024L * 1024L)
                 ) {
+                    chunkSize = savedChunkSize
+                    val totalChunksPreview = ((totalBytes + chunkSize - 1L) / chunkSize).toInt().coerceAtLeast(1)
                     val arr = cp.optJSONArray("completedChunks") ?: JSONArray()
                     for (i in 0 until arr.length()) {
                         val idx = arr.optInt(i, -1)
-                        if (idx in 0 until totalChunks) completedSet.add(idx)
+                        if (idx in 0 until totalChunksPreview) completedSet.add(idx)
                     }
                 }
             }
         }
 
-        if (completedSet.isEmpty()) {
-            // Pre-allocate full sparse file once for fast parallel random-access writes
-            runCatching {
-                RandomAccessFile(partFile, "rw").use { raf ->
-                    raf.setLength(totalBytes)
-                }
-            }.onFailure {
-                return false to "Insufficient phone storage for ${totalBytes / (1024L * 1024L)} MB model."
-            }
-        }
-
-        val pendingChunkIndices = (0 until totalChunks).filter { !completedSet.contains(it) }
+        val totalChunks = ((totalBytes + chunkSize - 1L) / chunkSize).toInt().coerceAtLeast(1)
+        val workerCount = TURBO_STREAMS.coerceAtMost(totalChunks)
         val resumedBytes = completedSet.sumOf { idx ->
             val start = idx.toLong() * chunkSize
             val end = minOf(start + chunkSize - 1L, totalBytes - 1L)
             (end - start + 1L)
         }
+        val remainingNeededBytes = (totalBytes - resumedBytes).coerceAtLeast(0L) + STORAGE_SAFETY_MARGIN_BYTES
 
+        // Always verify & reclaim storage on BOTH fresh downloads AND resumes (sparse files allocate real blocks as chunks arrive!)
+        val usableBytes = reclaimDownloadSpaceIfNeeded(context, modelId, remainingNeededBytes)
+        if (usableBytes in 1 until remainingNeededBytes) {
+            val freeMb = usableBytes / (1024L * 1024L)
+            val needMb = ((totalBytes - resumedBytes).coerceAtLeast(1L) / (1024L * 1024L)).coerceAtLeast(1L)
+            return false to "Low phone storage ($freeMb MB free, need $needMb MB more). Free storage, tap Reset, or download Qwen 2.5 0.5B (529 MB) / SmolLM 135M (175 MB)."
+        }
+
+        if (completedSet.isEmpty()) {
+            // Pre-allocate sparse target file once for fast parallel random-access writes
+            runCatching {
+                if (partFile.exists()) partFile.delete()
+                if (checkpointFile.exists()) checkpointFile.delete()
+                RandomAccessFile(partFile, "rw").use { raf ->
+                    raf.setLength(totalBytes)
+                }
+            }.onFailure { err ->
+                val freeMb = (partFile.parentFile?.usableSpace ?: 0L) / (1024L * 1024L)
+                val needMb = (totalBytes / (1024L * 1024L)).coerceAtLeast(1L)
+                return false to "Insufficient phone storage ($freeMb MB free, need $needMb MB): ${err.message ?: "Disk full"}"
+            }
+        }
+
+        val pendingChunkIndices = (0 until totalChunks).filter { !completedSet.contains(it) }
         val downloadedTotal = AtomicLong(resumedBytes)
         val sessionBytes = AtomicLong(0L)
         val startTimeMs = System.currentTimeMillis()
         val lastUiUpdateMs = AtomicLong(0L)
         val lastCheckpointSaveMs = AtomicLong(0L)
-        val queueCursor = AtomicInteger(0)
         val checkpointLock = Any()
+        val urlRefreshLock = Any()
+        val lastUrlRefreshMs = AtomicLong(0L)
+        val fatalAbortReason = AtomicReference<String?>(null)
 
         val activeDirectUrl = AtomicReference(target.finalUrl)
+
+        fun refreshDirectUrlSafe(force: Boolean = false) {
+            synchronized(urlRefreshLock) {
+                val now = System.currentTimeMillis()
+                if (!force && now - lastUrlRefreshMs.get() < 3000L) return
+                val refreshed = resolveAndProbeTarget(initialUrl, totalBytes)
+                if (refreshed.statusCode in listOf(200, 206)) {
+                    activeDirectUrl.set(refreshed.finalUrl)
+                    lastUrlRefreshMs.set(System.currentTimeMillis())
+                } else {
+                    // Fall back to canonical HF resolve URL so openRangeConnection resolves a fresh redirect hop
+                    activeDirectUrl.set(initialUrl)
+                }
+            }
+        }
 
         fun saveCheckpointLocked(force: Boolean = false) {
             val now = System.currentTimeMillis()
@@ -432,7 +567,7 @@ object ModelDownloadManager {
             synchronized(checkpointLock) {
                 runCatching {
                     val arr = JSONArray()
-                    completedSet.sorted().forEach { arr.put(it) }
+                    completedSet.toList().sorted().forEach { arr.put(it) }
                     checkpointFile.writeText(
                         JSONObject()
                             .put("fileName", fileName)
@@ -446,7 +581,7 @@ object ModelDownloadManager {
             }
         }
 
-        fun reportProgress(force: Boolean = false) {
+        fun reportProgress(force: Boolean = false, modeLabel: String = "Turbo ${workerCount}x") {
             val now = System.currentTimeMillis()
             val prev = lastUiUpdateMs.get()
             if (!force && now - prev < 220L) return
@@ -465,7 +600,131 @@ object ModelDownloadManager {
                 if (sec < 60L) "~${sec}s left" else "~${sec / 60}m ${sec % 60}s left"
             } else "measuring..."
             val speedStr = if (speedMb >= 0.1) "%.1f MB/s".format(speedMb) else "connecting..."
-            onProgress(pct, "Turbo ${workerCount}x · $doneMb/$totMb MB · $speedStr · $etaLabel")
+            onProgress(pct, "$modeLabel · $doneMb/$totMb MB · $speedStr · $etaLabel")
+        }
+
+        suspend fun downloadSingleChunk(
+            raf: RandomAccessFile,
+            buf: ByteArray,
+            chunkIdx: Int,
+            maxAttempts: Int,
+            readTimeoutMs: Int,
+            modeLabel: String,
+            useCanonicalUrlFallback: Boolean = false
+        ): Exception? {
+            val start = chunkIdx.toLong() * chunkSize
+            val end = minOf(start + chunkSize - 1L, totalBytes - 1L)
+            val expectedChunkLen = end - start + 1L
+            var attempt = 0
+            var lastErr: Exception? = null
+
+            while (attempt < maxAttempts) {
+                currentCoroutineContext().ensureActive()
+                if (fatalAbortReason.get() != null) {
+                    return IllegalStateException(fatalAbortReason.get())
+                }
+                var writtenInAttempt = 0L
+                var chunkConn: HttpURLConnection? = null
+                try {
+                    val reqUrl = if (useCanonicalUrlFallback && attempt >= 2) initialUrl else activeDirectUrl.get()
+                    chunkConn = openRangeConnection(
+                        initialUrl = reqUrl,
+                        rangeHeader = "bytes=$start-$end",
+                        connectTimeoutMs = 15000,
+                        readTimeoutMs = readTimeoutMs
+                    )
+                    val code = chunkConn.responseCode
+                    if (code == 400 || code == 403 || code == 410) {
+                        // Signed CDN URL expired mid-download -> force-refresh edge URL across workers
+                        chunkConn.disconnect()
+                        refreshDirectUrlSafe(force = true)
+                        attempt++
+                        delay(500L * attempt)
+                        continue
+                    }
+                    if (code == 416) {
+                        // Remote bundle changed size or range mismatch -> fail fast & let user restart cleanly
+                        chunkConn.disconnect()
+                        return IllegalStateException("Remote model file changed on server (HTTP 416). Tap Reset & Download.")
+                    }
+                    if (code == 429 || code in 500..504) {
+                        // CDN rate-limit or transient edge overload -> respect Retry-After & back off gracefully
+                        val retryAfterSec = chunkConn.getHeaderField("Retry-After")?.toLongOrNull()?.coerceIn(1L, 10L)
+                        chunkConn.disconnect()
+                        attempt++
+                        val waitMs = if (retryAfterSec != null) retryAfterSec * 1000L else (1000L * attempt)
+                        delay(waitMs)
+                        continue
+                    }
+                    if (start > 0L && code != 206) {
+                        chunkConn.disconnect()
+                        refreshDirectUrlSafe(force = true)
+                        lastErr = IllegalStateException("CDN returned HTTP $code instead of partial content for chunk $chunkIdx")
+                        attempt++
+                        delay(800L * attempt)
+                        continue
+                    }
+                    if (code != 206 && code != 200) {
+                        throw IllegalStateException("HTTP $code for chunk $chunkIdx")
+                    }
+                    raf.seek(start)
+                    chunkConn.inputStream.use { input ->
+                        var remaining = expectedChunkLen
+                        while (remaining > 0L) {
+                            currentCoroutineContext().ensureActive()
+                            val toRead = minOf(buf.size.toLong(), remaining).toInt()
+                            val read = input.read(buf, 0, toRead)
+                            if (read == -1) break
+                            raf.write(buf, 0, read)
+                            writtenInAttempt += read
+                            remaining -= read
+                            downloadedTotal.addAndGet(read.toLong())
+                            sessionBytes.addAndGet(read.toLong())
+                            reportProgress(modeLabel = modeLabel)
+                        }
+                    }
+                    chunkConn.disconnect()
+                    if (writtenInAttempt == expectedChunkLen) {
+                        completedSet.add(chunkIdx)
+                        saveCheckpointLocked()
+                        return null
+                    } else {
+                        // Short read / socket dropped mid-chunk -> roll back counters & retry cleanly
+                        downloadedTotal.addAndGet(-writtenInAttempt)
+                        sessionBytes.addAndGet(-writtenInAttempt)
+                        lastErr = IllegalStateException("Connection dropped ($writtenInAttempt/$expectedChunkLen bytes) on chunk $chunkIdx")
+                        attempt++
+                        if (attempt >= 2) refreshDirectUrlSafe(force = true)
+                        delay(700L * attempt)
+                    }
+                } catch (ce: CancellationException) {
+                    runCatching { chunkConn?.disconnect() }
+                    throw ce
+                } catch (e: Exception) {
+                    runCatching { chunkConn?.disconnect() }
+                    if (writtenInAttempt > 0L) {
+                        downloadedTotal.addAndGet(-writtenInAttempt)
+                        sessionBytes.addAndGet(-writtenInAttempt)
+                    }
+                    if (isOutOfSpaceError(e)) {
+                        val freeMb = (partFile.parentFile?.usableSpace ?: 0L) / (1024L * 1024L)
+                        val leftMb = ((totalBytes - downloadedTotal.get()).coerceAtLeast(1L) / (1024L * 1024L)).coerceAtLeast(1L)
+                        val diskMsg = "Phone storage full ($freeMb MB free, need $leftMb MB more). Free storage, tap Reset, or use Qwen 2.5 0.5B (529 MB) / SmolLM 135M (175 MB)."
+                        fatalAbortReason.compareAndSet(null, diskMsg)
+                        return IllegalStateException(diskMsg, e)
+                    }
+                    lastErr = e
+                    attempt++
+                    if (attempt == 2) {
+                        // Refresh CDN URL in case the signed edge host expired or reset
+                        refreshDirectUrlSafe(force = true)
+                    }
+                    if (attempt < maxAttempts) {
+                        delay(850L * attempt)
+                    }
+                }
+            }
+            return lastErr ?: IllegalStateException("Failed chunk $chunkIdx after $maxAttempts attempts")
         }
 
         if (resumedBytes > 0L) {
@@ -475,6 +734,10 @@ object ModelDownloadManager {
         }
 
         return try {
+            val queueCursor = AtomicInteger(0)
+            val lastFailureRef = AtomicReference<Exception?>(null)
+
+            // Pass 1: Fault-isolated 3x Turbo parallel download (a single transient chunk failure NEVER aborts healthy workers!)
             coroutineScope {
                 val workers = (0 until workerCount).map {
                     async(Dispatchers.IO) {
@@ -482,93 +745,21 @@ object ModelDownloadManager {
                         RandomAccessFile(partFile, "rw").use { raf ->
                             while (true) {
                                 currentCoroutineContext().ensureActive()
+                                if (fatalAbortReason.get() != null) break
                                 val pos = queueCursor.getAndIncrement()
                                 if (pos >= pendingChunkIndices.size) break
                                 val chunkIdx = pendingChunkIndices[pos]
-                                val start = chunkIdx.toLong() * chunkSize
-                                val end = minOf(start + chunkSize - 1L, totalBytes - 1L)
-                                val expectedChunkLen = end - start + 1L
-
-                                var attempt = 0
-                                var chunkOk = false
-                                var lastErr: Exception? = null
-                                while (attempt < 3 && !chunkOk) {
-                                    currentCoroutineContext().ensureActive()
-                                    var writtenInAttempt = 0L
-                                    var chunkConn: HttpURLConnection? = null
-                                    try {
-                                        chunkConn = (URL(activeDirectUrl.get()).openConnection() as HttpURLConnection).apply {
-                                            requestMethod = "GET"
-                                            instanceFollowRedirects = true
-                                            connectTimeout = 10000
-                                            readTimeout = 25000
-                                            setRequestProperty("User-Agent", USER_AGENT)
-                                            setRequestProperty("Range", "bytes=$start-$end")
-                                            setRequestProperty("Accept-Encoding", "identity")
-                                            setRequestProperty("Connection", "keep-alive")
-                                        }
-                                        val code = chunkConn.responseCode
-                                        if (code == 403 || code == 410) {
-                                            // Signed CDN URL expired during long pause/resume -> refresh edge URL
-                                            chunkConn.disconnect()
-                                            val refreshed = resolveAndProbeTarget(initialUrl, totalBytes)
-                                            if (refreshed.statusCode in listOf(200, 206)) {
-                                                activeDirectUrl.set(refreshed.finalUrl)
-                                            }
-                                            attempt++
-                                            delay(350L * attempt)
-                                            continue
-                                        }
-                                        if (start > 0L && code != 206) {
-                                            throw IllegalStateException("Server ignored Range header (HTTP $code) for chunk $chunkIdx")
-                                        }
-                                        if (code != 206 && code != 200) {
-                                            throw IllegalStateException("HTTP $code for chunk $chunkIdx")
-                                        }
-                                        raf.seek(start)
-                                        chunkConn.inputStream.use { input ->
-                                            var remaining = expectedChunkLen
-                                            while (remaining > 0L) {
-                                                currentCoroutineContext().ensureActive()
-                                                val toRead = minOf(buf.size.toLong(), remaining).toInt()
-                                                val read = input.read(buf, 0, toRead)
-                                                if (read == -1) break
-                                                raf.write(buf, 0, read)
-                                                writtenInAttempt += read
-                                                remaining -= read
-                                                downloadedTotal.addAndGet(read.toLong())
-                                                sessionBytes.addAndGet(read.toLong())
-                                                reportProgress()
-                                            }
-                                        }
-                                        chunkConn.disconnect()
-                                        if (writtenInAttempt == expectedChunkLen) {
-                                            completedSet.add(chunkIdx)
-                                            saveCheckpointLocked()
-                                            chunkOk = true
-                                        } else {
-                                            // Roll back partial counters for retry
-                                            downloadedTotal.addAndGet(-writtenInAttempt)
-                                            sessionBytes.addAndGet(-writtenInAttempt)
-                                            attempt++
-                                            delay(400L * attempt)
-                                        }
-                                    } catch (ce: CancellationException) {
-                                        runCatching { chunkConn?.disconnect() }
-                                        throw ce
-                                    } catch (e: Exception) {
-                                        runCatching { chunkConn?.disconnect() }
-                                        if (writtenInAttempt > 0L) {
-                                            downloadedTotal.addAndGet(-writtenInAttempt)
-                                            sessionBytes.addAndGet(-writtenInAttempt)
-                                        }
-                                        lastErr = e
-                                        attempt++
-                                        if (attempt < 3) delay(450L * attempt)
-                                    }
-                                }
-                                if (!chunkOk) {
-                                    throw lastErr ?: IllegalStateException("Failed chunk $chunkIdx after 3 attempts")
+                                val err = downloadSingleChunk(
+                                    raf = raf,
+                                    buf = buf,
+                                    chunkIdx = chunkIdx,
+                                    maxAttempts = 4,
+                                    readTimeoutMs = 30000,
+                                    modeLabel = "Turbo ${workerCount}x"
+                                )
+                                if (err != null) {
+                                    lastFailureRef.set(err)
+                                    Log.w(TAG, "Chunk $chunkIdx deferred to recovery pass: ${err.message}")
                                 }
                             }
                         }
@@ -577,14 +768,54 @@ object ModelDownloadManager {
                 workers.awaitAll()
             }
 
+            fatalAbortReason.get()?.let { diskMsg ->
+                saveCheckpointLocked(force = true)
+                return false to diskMsg
+            }
+
+            // Pass 2: Automatic gentle single-stream recovery pass for any chunks deferred by CDN expiry/throttling or Wi-Fi blips
+            val remainingToRecover = (0 until totalChunks).filter { !completedSet.contains(it) }
+            if (remainingToRecover.isNotEmpty()) {
+                saveCheckpointLocked(force = true)
+                refreshDirectUrlSafe(force = true)
+                delay(1200L)
+                val buf = ByteArray(IO_BUFFER_BYTES)
+                RandomAccessFile(partFile, "rw").use { raf ->
+                    for (chunkIdx in remainingToRecover) {
+                        currentCoroutineContext().ensureActive()
+                        if (fatalAbortReason.get() != null) break
+                        val err = downloadSingleChunk(
+                            raf = raf,
+                            buf = buf,
+                            chunkIdx = chunkIdx,
+                            maxAttempts = 6,
+                            readTimeoutMs = 45000,
+                            modeLabel = "Stabilizing",
+                            useCanonicalUrlFallback = true
+                        )
+                        if (err != null) {
+                            throw err
+                        }
+                    }
+                }
+            }
+
+            fatalAbortReason.get()?.let { diskMsg ->
+                saveCheckpointLocked(force = true)
+                return false to diskMsg
+            }
+
+            // Flush OS write buffers to flash before integrity check & atomic rename
+            runCatching { RandomAccessFile(partFile, "rw").use { it.fd.sync() } }
+
             // Verify exact size and valid ZIP/MediaPipe archive integrity before finalizing
             if (completedSet.size != totalChunks || partFile.length() != totalBytes) {
-                throw IllegalStateException("Incomplete download (${completedSet.size}/$totalChunks chunks)")
+                throw lastFailureRef.get() ?: IllegalStateException("Incomplete download (${completedSet.size}/$totalChunks chunks)")
             }
-            if (finalFile.name.endsWith(".task", ignoreCase = true) && !hasValidZipHeader(partFile)) {
+            if (finalFile.name.endsWith(".task", ignoreCase = true) && !hasValidBundleHeader(partFile)) {
                 runCatching { checkpointFile.delete() }
                 runCatching { partFile.delete() }
-                return false to "Downloaded bundle failed integrity check. Tap Download to retry."
+                return false to "Downloaded bundle failed integrity check (corrupted header). Tap Download to retry."
             }
 
             // Finalize atomic move
@@ -602,10 +833,14 @@ object ModelDownloadManager {
             throw ce
         } catch (e: Exception) {
             saveCheckpointLocked(force = true)
+            if (isOutOfSpaceError(e)) {
+                val freeMb = (partFile.parentFile?.usableSpace ?: 0L) / (1024L * 1024L)
+                return false to "Phone storage full ($freeMb MB free). Free space, tap Reset, or download a smaller model like Qwen 2.5 0.5B (529 MB)."
+            }
             val savedPct = ((completedSet.size * 100) / totalChunks).coerceIn(0, 99)
-            Log.e(TAG, "Turbo download paused/interrupted at $savedPct%", e)
+            Log.w(TAG, "Download interrupted at $savedPct% (checkpoint saved): ${e.message}")
             val resumeHint = if (savedPct > 0) " Progress ($savedPct%) saved — tap Resume anytime." else ""
-            false to "Download interrupted: ${e.message ?: "Network error"}.$resumeHint"
+            false to "Download paused: ${e.message ?: "Network error"}.$resumeHint"
         }
     }
 
@@ -619,14 +854,12 @@ object ModelDownloadManager {
     ): Pair<Boolean, String> {
         var conn: HttpURLConnection? = null
         return try {
-            conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
-                instanceFollowRedirects = true
-                connectTimeout = 10000
-                readTimeout = 30000
-                setRequestProperty("User-Agent", USER_AGENT)
-                setRequestProperty("Accept-Encoding", "identity")
-                setRequestProperty("Connection", "keep-alive")
-            }
+            conn = openRangeConnection(
+                initialUrl = urlStr,
+                rangeHeader = null,
+                connectTimeoutMs = 12000,
+                readTimeoutMs = 40000
+            )
             val code = conn.responseCode
             if (code !in 200..299) {
                 conn.disconnect()
@@ -657,9 +890,14 @@ object ModelDownloadManager {
                             onProgress(pct, "Downloading $label · $dlMb/$totMb MB · %.1f MB/s".format(speedMb))
                         }
                     }
+                    output.fd.sync()
                 }
             }
             conn.disconnect()
+            if (finalFile.name.endsWith(".task", ignoreCase = true) && !hasValidBundleHeader(partFile)) {
+                runCatching { partFile.delete() }
+                return false to "Downloaded bundle failed integrity check. Tap Download to retry."
+            }
             if (finalFile.exists()) finalFile.delete()
             if (!partFile.renameTo(finalFile)) {
                 partFile.copyTo(finalFile, overwrite = true)
@@ -671,6 +909,10 @@ object ModelDownloadManager {
             throw ce
         } catch (e: Exception) {
             runCatching { conn?.disconnect() }
+            if (isOutOfSpaceError(e)) {
+                val freeMb = (partFile.parentFile?.usableSpace ?: 0L) / (1024L * 1024L)
+                return false to "Phone storage full ($freeMb MB free). Free space or try a smaller model."
+            }
             false to "Download interrupted: ${e.message ?: "Network error"}"
         }
     }
@@ -799,17 +1041,35 @@ object ModelDownloadManager {
         true
     }
 
-    private fun hasValidZipHeader(file: File): Boolean {
+    private fun hasValidBundleHeader(file: File): Boolean {
         return runCatching {
-            if (!file.isFile || file.length() < 4L) return@runCatching false
+            if (!file.isFile || file.length() < 16L) return@runCatching false
+            val header = ByteArray(16)
             RandomAccessFile(file, "r").use { raf ->
-                val b0 = raf.read()
-                val b1 = raf.read()
-                val b2 = raf.read()
-                val b3 = raf.read()
-                // Standard ZIP local file header PK\x03\x04 (MediaPipe .task bundles are ZIP archives)
-                b0 == 0x50 && b1 == 0x4B && b2 == 0x03 && b3 == 0x04
+                val read = raf.read(header)
+                if (read < 8) return@runCatching false
             }
+            val b0 = header[0].toInt() and 0xFF
+            val b1 = header[1].toInt() and 0xFF
+            val b2 = header[2].toInt() and 0xFF
+            val b3 = header[3].toInt() and 0xFF
+            // Standard ZIP archive (PK\x03\x04) used by MediaPipe .task bundles
+            val isZip = (b0 == 0x50 && b1 == 0x4B && b2 == 0x03 && b3 == 0x04)
+            // TFLite FlatBuffer ("TFL3" at offset 4..7)
+            val isTflite = (header[4].toInt() == 'T'.code &&
+                header[5].toInt() == 'F'.code &&
+                header[6].toInt() == 'L'.code &&
+                header[7].toInt() == '3'.code)
+            if (isZip || isTflite) return@runCatching true
+
+            // Explicitly reject HTML/XML/JSON error pages accidentally saved as weights
+            val ascii = String(header, Charsets.UTF_8).trimStart().lowercase()
+            if (ascii.startsWith("<html") || ascii.startsWith("<!doc") || ascii.startsWith("<?xml") || ascii.startsWith("{")) {
+                Log.w(TAG, "Rejected text/HTML error payload instead of model weights: ${ascii.take(12)}")
+                return@runCatching false
+            }
+            Log.w(TAG, "Unexpected .task header bytes: %02X %02X %02X %02X".format(b0, b1, b2, b3))
+            false
         }.getOrDefault(false)
     }
 
