@@ -136,8 +136,9 @@ fun HudMessageCard(
             border = BorderStroke(1.dp, border)
         ) {
             Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
+                val highlightColor = SapphireBright
                 Text(
-                    text = if (message.isUser) androidx.compose.ui.text.AnnotatedString(message.text) else renderCleanStyledText(message.text),
+                    text = if (message.isUser) androidx.compose.ui.text.AnnotatedString(message.text) else renderCleanStyledText(message.text, highlightColor),
                     style = MaterialTheme.typography.bodyLarge,
                     color = TextPrimary
                 )
@@ -362,7 +363,10 @@ fun HudMessageCard(
     }
 }
 
-private fun renderCleanStyledText(raw: String): androidx.compose.ui.text.AnnotatedString {
+private fun renderCleanStyledText(
+    raw: String,
+    highlightColor: androidx.compose.ui.graphics.Color
+): androidx.compose.ui.text.AnnotatedString {
     return androidx.compose.ui.text.buildAnnotatedString {
         val cleaned = raw
             .replace(Regex("^#{1,4}\\s+", RegexOption.MULTILINE), "")
@@ -376,7 +380,7 @@ private fun renderCleanStyledText(raw: String): androidx.compose.ui.text.Annotat
             if (match.range.first > lastIndex) {
                 append(cleaned.substring(lastIndex, match.range.first).replace("`", ""))
             }
-            pushStyle(androidx.compose.ui.text.SpanStyle(fontWeight = FontWeight.SemiBold, color = SapphireBright))
+            pushStyle(androidx.compose.ui.text.SpanStyle(fontWeight = FontWeight.SemiBold, color = highlightColor))
             append(match.groupValues[1].replace("`", ""))
             pop()
             lastIndex = match.range.last + 1

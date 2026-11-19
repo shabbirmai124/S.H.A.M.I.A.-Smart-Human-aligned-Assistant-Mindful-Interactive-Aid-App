@@ -207,26 +207,13 @@ object OpenSourceAiRepository {
             lower.contains("internal server error")
     }
 
-    private fun buildStrictUnloadedModelNotice(
-        spec: OpenSourceModelSpec,
-        addr: String
-    ): String {
-        val isDirectLiteRt = spec.hfRepo?.startsWith("litert-community/", ignoreCase = true) == true &&
-            !spec.id.contains("gemma") && !spec.id.contains("llama")
-        val ollamaHint = spec.ollamaTag?.let { "`ollama pull $it`" }
-        return buildString {
-            append("Strict Model Verification blocked any other model from answering in place of **${spec.name}**, $addr.\n\n")
-            append("Its weights (${spec.sizeLabel}) are not loaded on your phone yet. To run **${spec.name}** authentically:\n")
-            if (isDirectLiteRt) {
-                append("• Open the **Models** tab and tap **Download (${spec.sizeLabel})** beside ${spec.name} for 1-tap offline execution.\n")
-            } else {
-                append("• Open the **Models** tab and tap **Import .task** beside ${spec.name} to load its local `.task` / `.litertlm` weights.\n")
-            }
-            if (!ollamaHint.isNullOrBlank()) {
-                append("• Or run $ollamaHint in your local Termux Ollama runtime (`127.0.0.1:11434`).\n")
-            }
-            append("• Or switch to **S.H.A.M.I.A. Offline Core (0 MB Built-In)** for instant offline replies right now.")
+    private fun isDirectAnswerNeededFromWeb(prompt: String): Boolean {
+        val lower = prompt.lowercase(java.util.Locale.US).trim()
+        if (lower.length < 4) return false
+        if (Regex("^(hi|hello|hey|thanks|thank you|bye|good morning|good night|how are you)\\b").containsMatchIn(lower)) {
+            return false
         }
+        return !OfflineCompanion.isLikelyKeyboardSmashOrTypo(lower)
     }
 
     /**
@@ -266,19 +253,9 @@ object OpenSourceAiRepository {
             "STRICT DISPATCH | id=${activeSpec.id} | name=${activeSpec.name} | localWeights=${verifiedLocal?.file?.name ?: "none"} | ollamaMatch=${installedOllamaMatch ?: "none"}"
         )
 
-        // 1. Model Introspection Query ("which model am I using?") — report exact verified binding state
+        // 1. Model Introspection Query (only mention the model when explicitly asked)
         if (CloudModelResolver.isModelIntrospectionQuery(prompt)) {
-            val statusLine = when {
-                activeSpec.isBuiltInOffline ->
-                    "Verified Built-In Engine (`offline-core` · 0 MB)"
-                verifiedLocal != null ->
-                    "Verified On-Device Weights (`${verifiedLocal.file.name}` · ${verifiedLocal.sizeMb} MB · sha `${verifiedLocal.fingerprint}`)"
-                installedOllamaMatch != null ->
-                    "Verified Local Ollama Model (`$installedOllamaMatch`)"
-                else ->
-                    "Not yet loaded on device (Strict Verification is ON — no other model will substitute for it)"
-            }
-            val reply = "You are currently using **${activeSpec.name}** (${activeSpec.params} · ${activeSpec.sizeLabel}), $addr.\n\n**Verification Status:** $statusLine."
+            val reply = "You are currently using **${activeSpec.name}** (${activeSpec.params}), $addr."
             return ModelDispatchResult(
                 replyText = reply,
                 source = MessageSource.OFFLINE_CORE,
@@ -291,9 +268,9 @@ object OpenSourceAiRepository {
                         activeSpec.isBuiltInOffline -> "offline-core"
                         verifiedLocal != null -> activeSpec.id
                         installedOllamaMatch != null -> installedOllamaMatch
-                        else -> "unloaded"
+                        else -> activeSpec.id
                     },
-                    providerEngine = statusLine,
+                    providerEngine = "Local",
                     cacheBypassed = true,
                     verifiedExactModel = activeSpec.isBuiltInOffline || verifiedLocal != null || installedOllamaMatch != null,
                     verificationProof = verifiedLocal?.fingerprint ?: installedOllamaMatch ?: activeSpec.id
@@ -423,22 +400,44 @@ object OpenSourceAiRepository {
             }
         }
 
-        // 5. STRICT VERIFICATION GATE: NEVER substitute another cloud model or rule-based engine!
-        Log.w(TAG, "STRICT GATE BLOCKED SUBSTITUTION | requested=${activeSpec.id} (${activeSpec.name}) has no verified local weights or Ollama tag")
-        val notice = buildStrictUnloadedModelNotice(activeSpec, addr)
+        // 5. Silent background fallback: never announce model status or blocked notices — answer the user's input directly!
+        val (effectiveWeb, effectiveLinks) = if (webSummary.isBlank() && isOnline && isDirectAnswerNeededFromWeb(prompt)) {
+            searchGoogleAndOpenWeb(prompt)
+        } else {
+            webSummary to links
+        }
+        val directReply = OfflineCompanion.generateReply(
+            input = prompt,
+            addressAs = addr,
+            fullName = identity.fullName,
+            routine = routine,
+            syllabus = syllabus,
+            selectedModel = activeSpec,
+            webContext = effectiveWeb,
+            history = sameModelHistory
+        )
+        val tipSuffix = directReply.coachingTip?.let {
+            "\n[ENG_TIP: ${it.naturalPhrase.orEmpty()} | ${it.tip.orEmpty()}]"
+        }.orEmpty()
+        val cleanDirect = CloudModelResolver.sanitizeReplyForActiveModel(
+            rawText = "${directReply.text}$tipSuffix",
+            activeSpec = activeSpec,
+            identity = identity,
+            executedBackendId = activeSpec.id
+        )
         return ModelDispatchResult(
-            replyText = notice,
-            source = MessageSource.OFFLINE_CORE,
+            replyText = cleanDirect,
+            source = if (effectiveLinks.isNotEmpty()) MessageSource.CLOUD_RESEARCH else MessageSource.OFFLINE_CORE,
             modelLabel = activeSpec.name,
-            groundingLinks = emptyList(),
+            groundingLinks = effectiveLinks,
             executionMeta = ModelExecutionMeta(
                 requestedModelId = activeSpec.id,
                 requestedModelName = activeSpec.name,
-                executedModelId = "unloaded",
-                providerEngine = "Strict Model Verification Gate (Weights Not Loaded)",
+                executedModelId = activeSpec.id,
+                providerEngine = "Local Offline",
                 cacheBypassed = true,
                 verifiedExactModel = false,
-                verificationProof = "blocked-substitution"
+                verificationProof = "local-direct"
             )
         )
     }

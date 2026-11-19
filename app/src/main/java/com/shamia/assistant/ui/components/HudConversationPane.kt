@@ -28,11 +28,14 @@ import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.AddComment
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.PersonOutline
+import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -52,6 +55,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.shamia.assistant.model.AppThemeMode
 import com.shamia.assistant.model.CoreVisualState
 import com.shamia.assistant.ui.ShamiaUiState
 import com.shamia.assistant.ui.theme.CardBorder
@@ -71,8 +75,11 @@ fun TopCockpitBar(
     state: ShamiaUiState,
     onNewChat: () -> Unit,
     onToggleVoiceReply: () -> Unit,
+    onToggleTheme: () -> Unit,
+    onToggleVoiceAssistantMode: () -> Unit,
     onOpenIdentity: () -> Unit
 ) {
+    val isLight = state.themeMode == AppThemeMode.LIGHT
     Surface(
         color = GraphiteSurface,
         border = BorderStroke(1.dp, CardBorder)
@@ -80,7 +87,7 @@ fun TopCockpitBar(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 10.dp),
+                .padding(horizontal = 12.dp, vertical = 10.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -93,39 +100,57 @@ fun TopCockpitBar(
 
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                // Identity Pill Button matching screenshot: [ 👤 Kajol / Md Shabbir Mia ]
+                // Hands-Free Voice Assistant Mode Pill
                 Surface(
-                    onClick = onOpenIdentity,
+                    onClick = onToggleVoiceAssistantMode,
                     shape = RoundedCornerShape(12.dp),
-                    color = CardSlate,
-                    border = BorderStroke(1.dp, CardBorder),
-                    modifier = Modifier.testTag("account_identity_button")
+                    color = if (state.handsFreeVoiceMode) SapphireContainer else CardSlate,
+                    border = BorderStroke(
+                        1.dp,
+                        if (state.handsFreeVoiceMode) SapphirePulse else CardBorder
+                    ),
+                    modifier = Modifier.testTag("voice_assistant_mode_toggle")
                 ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                    Box(
+                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 8.dp),
+                        contentAlignment = Alignment.Center
                     ) {
                         Icon(
-                            imageVector = Icons.Filled.PersonOutline,
-                            contentDescription = "Owner profile settings",
-                            tint = SapphireBright,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = state.identity.fullName.take(16),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = TextPrimary,
-                            fontWeight = FontWeight.Medium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                            imageVector = Icons.Filled.RecordVoiceOver,
+                            contentDescription = if (state.handsFreeVoiceMode) "Stop Hands-Free Voice Assistant" else "Start Hands-Free Voice Assistant",
+                            tint = if (state.handsFreeVoiceMode) SapphireBright else TextSecondary,
+                            modifier = Modifier.size(18.dp)
                         )
                     }
                 }
 
-                // Voice Reply Speaker Toggle Pill Button: [ 🔊 ]
+                // 1-Tap Google White / Obsidian Dark Theme Switcher
+                Surface(
+                    onClick = onToggleTheme,
+                    shape = RoundedCornerShape(12.dp),
+                    color = if (isLight) SapphireContainer else CardSlate,
+                    border = BorderStroke(
+                        1.dp,
+                        if (isLight) SapphirePulse.copy(alpha = 0.6f) else CardBorder
+                    ),
+                    modifier = Modifier.testTag("theme_mode_toggle")
+                ) {
+                    Box(
+                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 8.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = if (isLight) Icons.Filled.DarkMode else Icons.Filled.LightMode,
+                            contentDescription = if (isLight) "Switch to Obsidian Dark Theme" else "Switch to Google White Theme",
+                            tint = if (isLight) SapphireBright else SapphirePulse,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+
+                // Voice Reply Speaker Toggle Pill Button
                 Surface(
                     onClick = onToggleVoiceReply,
                     shape = RoundedCornerShape(12.dp),
@@ -137,7 +162,7 @@ fun TopCockpitBar(
                     modifier = Modifier.testTag("voice_reply_toggle")
                 ) {
                     Box(
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 8.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
@@ -149,7 +174,28 @@ fun TopCockpitBar(
                     }
                 }
 
-                // New Chat / Model Session Button: [ ◫ ]
+                // Owner Profile Button
+                Surface(
+                    onClick = onOpenIdentity,
+                    shape = RoundedCornerShape(12.dp),
+                    color = CardSlate,
+                    border = BorderStroke(1.dp, CardBorder),
+                    modifier = Modifier.testTag("account_identity_button")
+                ) {
+                    Box(
+                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 8.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.PersonOutline,
+                            contentDescription = "Owner profile settings (${state.identity.fullName})",
+                            tint = SapphireBright,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+
+                // New Chat / Model Session Button
                 Surface(
                     onClick = onNewChat,
                     shape = RoundedCornerShape(12.dp),
@@ -158,7 +204,7 @@ fun TopCockpitBar(
                     modifier = Modifier.testTag("new_chat_button")
                 ) {
                     Box(
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 8.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
@@ -351,6 +397,74 @@ fun HudConversationPane(
                                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp)
                             )
                         }
+                    }
+                }
+            }
+        }
+
+        if (state.handsFreeVoiceMode || state.coreState == CoreVisualState.LISTENING) {
+            Surface(
+                color = SapphireContainer,
+                border = BorderStroke(1.dp, SapphirePulse.copy(alpha = 0.65f)),
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.RecordVoiceOver,
+                            contentDescription = "Voice Assistant active",
+                            tint = SapphireBright,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Column {
+                            Text(
+                                text = if (state.handsFreeVoiceMode) "Hands-Free Voice Assistant ON" else "Listening for your voice...",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = SapphireBright,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = state.liveTranscript.ifBlank {
+                                    when (state.coreState) {
+                                        CoreVisualState.SPEAKING -> "Speaking reply — will listen again when done"
+                                        CoreVisualState.THINKING -> "Processing your voice command..."
+                                        else -> "Speak naturally or tap Stop to end"
+                                    }
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = TextPrimary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                    Surface(
+                        onClick = onStopGeneration,
+                        shape = RoundedCornerShape(10.dp),
+                        color = RoseDeny.copy(alpha = 0.16f),
+                        border = BorderStroke(1.dp, RoseDeny),
+                        modifier = Modifier.testTag("voice_banner_stop_button")
+                    ) {
+                        Text(
+                            text = "Stop",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = RoseDeny,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                        )
                     }
                 }
             }

@@ -1,6 +1,7 @@
 package com.shamia.assistant.engine
 
 import android.content.Context
+import android.os.Build
 import android.util.Log
 import com.google.mediapipe.tasks.genai.llminference.LlmInference
 import com.google.mediapipe.tasks.genai.llminference.LlmInferenceSession
@@ -11,10 +12,12 @@ import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import java.io.File
 import java.io.FileInputStream
 import java.security.MessageDigest
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -37,39 +40,70 @@ data class VerifiedNativeOutput(
 
 /**
  * True On-Device Offline Neural LLM Runtime powered by MediaPipe GenAI / LiteRT.
- * Strictly binds every inference session to the exact selected model's isolated weights directory
- * (`filesDir/models/<modelId>/`), verifies manifest descriptor integrity, and unloads any other
- * model from RAM before generating tokens.
+ * Optimized for ultra-fast local loading with:
+ * - O(1) verified-binding memory cache
+ * - Smart GPU-vs-CPU backend selection (skips slow failing GPU probes on emulators/CPU-only devices)
+ * - Automatic background RAM pre-warming right after download, model switch, or app launch
+ * - Strict cryptographic/path binding to `filesDir/models/<modelId>/`
  */
 object OnDeviceLlmEngine {
 
     private const val TAG = "ShamiaOnDeviceLLM"
-    private const val MIN_REAL_MODEL_BYTES = 10L * 1024L * 1024L // 10 MB minimum for real neural weights
+    private const val MIN_REAL_MODEL_BYTES = 10L * 1024L * 1024L
 
     private val engineDispatcher = Executors.newSingleThreadExecutor { r ->
         Thread(r, "shamia-local-llm").apply { isDaemon = true }
     }.asCoroutineDispatcher()
 
+    private data class CachedBinding(
+        val canonicalPath: String,
+        val length: Long,
+        val lastModified: Long,
+        val verified: VerifiedLocalWeights
+    )
+
+    private val bindingCache = ConcurrentHashMap<String, CachedBinding>()
+
     private val mutex = Mutex()
+    @Volatile
     private var loadedModelId: String? = null
+    @Volatile
     private var loadedModelPath: String? = null
+    @Volatile
     private var activeBackendLabel: String = "CPU"
+    @Volatile
+    private var gpuDelegateUnsupported: Boolean = detectLikelyEmulatorWithoutGpu()
     private var llmInference: LlmInference? = null
 
     @Volatile
     private var activeSession: LlmInferenceSession? = null
     private val cancelledFlag = AtomicBoolean(false)
 
-    /**
-     * Computes a fast, deterministic SHA-256 fingerprint prefix (first 2 MB + exact file size)
-     * to cryptographically bind a weights file to its model descriptor without stalling mobile I/O.
-     */
+    private fun detectLikelyEmulatorWithoutGpu(): Boolean {
+        val fp = Build.FINGERPRINT.lowercase()
+        val model = Build.MODEL.lowercase()
+        val hw = Build.HARDWARE.lowercase()
+        val prod = Build.PRODUCT.lowercase()
+        return fp.contains("generic") ||
+            fp.contains("emulator") ||
+            model.contains("emulator") ||
+            model.contains("android sdk built for") ||
+            hw.contains("goldfish") ||
+            hw.contains("ranchu") ||
+            prod.contains("sdk_gphone") ||
+            prod.contains("emulator")
+    }
+
+    fun invalidateCache(modelId: String? = null) {
+        if (modelId == null) bindingCache.clear() else bindingCache.remove(modelId)
+    }
+
     fun computeFastFingerprint(file: File): String {
         return runCatching {
             val digest = MessageDigest.getInstance("SHA-256")
             digest.update(file.length().toString().toByteArray())
-            val buf = ByteArray(64 * 1024)
-            var remaining = 2L * 1024L * 1024L
+            val buf = ByteArray(128 * 1024)
+            var remaining = 1024L * 1024L // Fast 1 MB prefix + exact file size
             FileInputStream(file).use { fis ->
                 while (remaining > 0) {
                     val toRead = minOf(buf.size.toLong(), remaining).toInt()
@@ -84,10 +118,19 @@ object OnDeviceLlmEngine {
     }
 
     /**
-     * Strictly locates and verifies the real weights file bound to [modelId].
-     * Guarantees the file lives inside `filesDir/models/<modelId>/` and matches `model_descriptor.json` if present.
+     * Strictly locates and verifies the real weights file bound to [modelId] with O(1) memoization.
      */
     fun verifyModelBinding(context: Context, modelId: String): VerifiedLocalWeights? {
+        val cached = bindingCache[modelId]
+        if (cached != null) {
+            val f = cached.verified.file
+            if (f.isFile && f.length() == cached.length && f.lastModified() == cached.lastModified) {
+                return cached.verified
+            } else {
+                bindingCache.remove(modelId)
+            }
+        }
+
         val modelDir = File(context.filesDir, "models/$modelId")
         if (!modelDir.exists() || !modelDir.isDirectory) return null
         val canonicalDir = runCatching { modelDir.canonicalPath }.getOrNull() ?: return null
@@ -100,7 +143,7 @@ object OnDeviceLlmEngine {
         if (descriptor != null) {
             val boundId = descriptor.optString("id")
             if (boundId.isNotBlank() && boundId != modelId) {
-                Log.e(TAG, "STRICT VERIFICATION FAILED: descriptor id=$boundId does not match requested modelId=$modelId")
+                Log.e(TAG, "STRICT VERIFICATION FAILED: descriptor id=$boundId != $modelId")
                 return null
             }
         }
@@ -120,16 +163,15 @@ object OnDeviceLlmEngine {
             candidates.firstOrNull()
         } ?: return null
 
-        // Strict canonical path containment check — impossible to escape into another model's folder
         val canonicalFile = runCatching { weightsFile.canonicalPath }.getOrNull() ?: return null
         if (!canonicalFile.startsWith("$canonicalDir${File.separator}")) {
-            Log.e(TAG, "STRICT VERIFICATION FAILED: file path $canonicalFile outside $canonicalDir")
+            Log.e(TAG, "STRICT VERIFICATION FAILED: $canonicalFile outside $canonicalDir")
             return null
         }
 
         val storedSize = descriptor?.optLong("bytes", -1L) ?: -1L
         if (storedSize > 0L && weightsFile.length() != storedSize) {
-            Log.e(TAG, "STRICT VERIFICATION FAILED: file size ${weightsFile.length()} != descriptor $storedSize")
+            Log.e(TAG, "STRICT VERIFICATION FAILED: size ${weightsFile.length()} != $storedSize")
             return null
         }
 
@@ -139,13 +181,15 @@ object OnDeviceLlmEngine {
             ?: descriptor?.optString("source")?.takeIf { it.isNotBlank() }
             ?: "Local Weights"
 
-        return VerifiedLocalWeights(
+        val verified = VerifiedLocalWeights(
             modelId = modelId,
             file = weightsFile,
             sizeMb = weightsFile.length() / (1024L * 1024L),
             fingerprint = fingerprint,
             sourceLabel = sourceLabel
         )
+        bindingCache[modelId] = CachedBinding(canonicalFile, weightsFile.length(), weightsFile.lastModified(), verified)
+        return verified
     }
 
     fun findInstalledWeightsFile(context: Context, modelId: String): File? =
@@ -159,9 +203,8 @@ object OnDeviceLlmEngine {
 
     fun currentLoadedModelId(): String? = loadedModelId
 
-    /**
-     * Immediately interrupts active native C++ token generation when the user taps Stop.
-     */
+    fun currentLoadedBackend(): String = activeBackendLabel
+
     fun cancelGeneration() {
         cancelledFlag.set(true)
         runCatching {
@@ -170,9 +213,25 @@ object OnDeviceLlmEngine {
     }
 
     /**
-     * Immediately releases native weights from RAM if a different model is currently loaded,
-     * preventing any stale session or cross-model memory state when switching models.
+     * Pre-warms the exact installed model into RAM in the background so the user's first prompt
+     * starts streaming tokens immediately with zero cold-load stall.
+     * Returns Pair(loadedSuccessfully, backendLabel).
      */
+    suspend fun preloadModel(context: Context, modelId: String): Pair<Boolean, String> {
+        val verified = verifyModelBinding(context, modelId) ?: return false to ""
+        return mutex.withLock {
+            withContext(engineDispatcher) {
+                try {
+                    ensureLoadedStrict(context, verified)
+                    true to activeBackendLabel
+                } catch (t: Throwable) {
+                    Log.w(TAG, "Background preload skipped for $modelId: ${t.message}")
+                    false to ""
+                }
+            }
+        }
+    }
+
     suspend fun unloadIfDifferent(targetModelId: String) = mutex.withLock {
         withContext(engineDispatcher) {
             if (loadedModelId != null && loadedModelId != targetModelId) {
@@ -182,9 +241,6 @@ object OnDeviceLlmEngine {
         }
     }
 
-    /**
-     * Unloads any currently loaded model from RAM (e.g., when removing a model or freeing memory).
-     */
     suspend fun release() = mutex.withLock {
         withContext(engineDispatcher) {
             closeInternal()
@@ -207,18 +263,33 @@ object OnDeviceLlmEngine {
             return llmInference!!
         }
         closeInternal()
+        val loadStartMs = System.currentTimeMillis()
 
-        val gpuAttempt = runCatching {
-            val opts = LlmInference.LlmInferenceOptions.builder()
-                .setModelPath(canonicalPath)
-                .setMaxTokens(1024)
-                .setPreferredBackend(LlmInference.Backend.GPU)
-                .build()
-            LlmInference.createFromOptions(context.applicationContext, opts)
-        }
-
-        val engine = gpuAttempt.getOrElse { gpuErr ->
-            Log.w(TAG, "GPU delegate unavailable (${gpuErr.message}); falling back to local CPU backend")
+        val engine = if (!gpuDelegateUnsupported) {
+            val gpuAttempt = runCatching {
+                val opts = LlmInference.LlmInferenceOptions.builder()
+                    .setModelPath(canonicalPath)
+                    .setMaxTokens(1024)
+                    .setPreferredBackend(LlmInference.Backend.GPU)
+                    .build()
+                LlmInference.createFromOptions(context.applicationContext, opts)
+            }
+            if (gpuAttempt.isSuccess) {
+                activeBackendLabel = "GPU"
+                gpuAttempt.getOrThrow()
+            } else {
+                // Remember GPU unavailability on this device to avoid wasting 5-10s on future loads!
+                gpuDelegateUnsupported = true
+                Log.w(TAG, "GPU delegate unavailable (${gpuAttempt.exceptionOrNull()?.message}); switching straight to fast CPU")
+                val cpuOpts = LlmInference.LlmInferenceOptions.builder()
+                    .setModelPath(canonicalPath)
+                    .setMaxTokens(1024)
+                    .setPreferredBackend(LlmInference.Backend.CPU)
+                    .build()
+                activeBackendLabel = "CPU"
+                LlmInference.createFromOptions(context.applicationContext, cpuOpts)
+            }
+        } else {
             val cpuOpts = LlmInference.LlmInferenceOptions.builder()
                 .setModelPath(canonicalPath)
                 .setMaxTokens(1024)
@@ -228,24 +299,17 @@ object OnDeviceLlmEngine {
             LlmInference.createFromOptions(context.applicationContext, cpuOpts)
         }
 
-        if (gpuAttempt.isSuccess) {
-            activeBackendLabel = "GPU"
-        }
-
         llmInference = engine
         loadedModelId = verified.modelId
         loadedModelPath = canonicalPath
+        val elapsedMs = System.currentTimeMillis() - loadStartMs
         Log.i(
             TAG,
-            "STRICT LOAD VERIFIED | modelId=${verified.modelId} | file=${verified.file.name} | size=${verified.sizeMb}MB | sha=${verified.fingerprint} | backend=$activeBackendLabel"
+            "FAST LOAD VERIFIED | modelId=${verified.modelId} | file=${verified.file.name} | size=${verified.sizeMb}MB | sha=${verified.fingerprint} | backend=$activeBackendLabel | loadMs=$elapsedMs"
         )
         return engine
     }
 
-    /**
-     * Runs real local offline neural inference strictly bound to [spec].
-     * Returns null if verified weights for [spec.id] are not installed on disk.
-     */
     suspend fun generateOfflineStream(
         context: Context,
         spec: OpenSourceModelSpec,
@@ -260,13 +324,14 @@ object OnDeviceLlmEngine {
         return mutex.withLock {
             withContext(engineDispatcher) {
                 cancelledFlag.set(false)
-                val engine = runCatching { ensureLoadedStrict(context, verified) }
-                    .onFailure { Log.e(TAG, "Failed to initialize local model ${spec.id}", it) }
-                    .getOrNull() ?: return@withContext null
+                val engine = try {
+                    ensureLoadedStrict(context, verified)
+                } catch (t: Throwable) {
+                    Log.e(TAG, "Failed to initialize local model ${spec.id}", t)
+                    null
+                } ?: return@withContext null
 
-                // Hard runtime assertion: loaded native runtime MUST match requested spec.id and canonical file path
                 if (loadedModelId != spec.id || loadedModelPath != verified.file.canonicalPath) {
-                    Log.e(TAG, "STRICT ASSERTION FAILED: loaded=$loadedModelId vs requested=${spec.id}")
                     closeInternal()
                     return@withContext null
                 }
@@ -279,62 +344,84 @@ object OnDeviceLlmEngine {
                     webContext = webContext
                 )
 
-                val sessionOptions = LlmInferenceSession.LlmInferenceSessionOptions.builder()
-                    .setTopK(40)
-                    .setTopP(0.92f)
-                    .setTemperature(0.7f)
-                    .build()
+                val primaryReply = runSingleNativeSession(
+                    engine = engine,
+                    prompt = formattedPrompt,
+                    onPartialResponse = onPartialResponse
+                )
 
-                val session = runCatching {
-                    LlmInferenceSession.createFromOptions(engine, sessionOptions)
-                }.onFailure {
-                    Log.e(TAG, "Failed to create LlmInferenceSession", it)
-                }.getOrNull() ?: return@withContext null
-
-                activeSession = session
-                val buffer = StringBuilder()
-                val completion = CompletableDeferred<String>()
-
-                try {
-                    session.addQueryChunk(formattedPrompt)
-                    session.generateResponseAsync { partialResult, done ->
-                        if (!partialResult.isNullOrEmpty() && !cancelledFlag.get()) {
-                            buffer.append(partialResult)
-                            onPartialResponse(cleanRawTokens(buffer.toString()))
-                        }
-                        if (done && !completion.isCompleted) {
-                            completion.complete(cleanRawTokens(buffer.toString()))
-                        }
+                val finalReply = if (!primaryReply.isNullOrBlank() || cancelledFlag.get()) {
+                    primaryReply
+                } else {
+                    // Retry once with a clean minimal prompt in case the .task bundle applies its own internal chat template
+                    val simplePrompt = if (webContext.isNotBlank()) {
+                        "Context: ${webContext.take(800)}\n\nQuestion: $userPrompt\nAnswer:"
+                    } else {
+                        "Question: $userPrompt\nAnswer:"
                     }
-                    val finalReply = completion.await()
-                    if (finalReply.isBlank()) null
-                    else VerifiedNativeOutput(
-                        text = finalReply,
-                        backendLabel = "Verified On-Device LiteRT ($activeBackendLabel · ${verified.sizeMb} MB)",
-                        verifiedModelId = spec.id,
-                        weightsFileName = verified.file.name,
-                        weightsSizeMb = verified.sizeMb,
-                        verificationProof = "file=${verified.file.name} · sha=${verified.fingerprint} · $activeBackendLabel"
+                    runSingleNativeSession(
+                        engine = engine,
+                        prompt = simplePrompt,
+                        onPartialResponse = onPartialResponse
                     )
-                } catch (e: Exception) {
-                    Log.w(TAG, "Generation interrupted or failed: ${e.message}")
-                    val partial = cleanRawTokens(buffer.toString())
-                    if (partial.isNotBlank()) {
-                        VerifiedNativeOutput(
-                            text = partial,
-                            backendLabel = "Verified On-Device LiteRT ($activeBackendLabel · ${verified.sizeMb} MB)",
-                            verifiedModelId = spec.id,
-                            weightsFileName = verified.file.name,
-                            weightsSizeMb = verified.sizeMb,
-                            verificationProof = "file=${verified.file.name} · sha=${verified.fingerprint} · $activeBackendLabel"
-                        )
-                    } else null
-                } finally {
-                    runCatching { session.close() }
-                    if (activeSession === session) {
-                        activeSession = null
-                    }
                 }
+
+                if (finalReply.isNullOrBlank()) null
+                else VerifiedNativeOutput(
+                    text = finalReply,
+                    backendLabel = "On-Device ($activeBackendLabel)",
+                    verifiedModelId = spec.id,
+                    weightsFileName = verified.file.name,
+                    weightsSizeMb = verified.sizeMb,
+                    verificationProof = "file=${verified.file.name} · sha=${verified.fingerprint} · $activeBackendLabel"
+                )
+            }
+        }
+    }
+
+    private suspend fun runSingleNativeSession(
+        engine: LlmInference,
+        prompt: String,
+        onPartialResponse: (accumulatedText: String) -> Unit
+    ): String? {
+        val sessionOptions = LlmInferenceSession.LlmInferenceSessionOptions.builder()
+            .setTopK(40)
+            .setTopP(0.90f)
+            .setTemperature(0.65f)
+            .build()
+
+        val session = try {
+            LlmInferenceSession.createFromOptions(engine, sessionOptions)
+        } catch (t: Throwable) {
+            Log.e(TAG, "Failed to create LlmInferenceSession", t)
+            null
+        } ?: return null
+
+        activeSession = session
+        val buffer = StringBuilder()
+        val completion = CompletableDeferred<String>()
+
+        return try {
+            session.addQueryChunk(prompt)
+            session.generateResponseAsync { partialResult, done ->
+                if (!partialResult.isNullOrEmpty() && !cancelledFlag.get()) {
+                    buffer.append(partialResult)
+                    onPartialResponse(cleanRawTokens(buffer.toString()))
+                }
+                if (done && !completion.isCompleted) {
+                    completion.complete(cleanRawTokens(buffer.toString()))
+                }
+            }
+            val result = withTimeoutOrNull(45_000L) { completion.await() }
+                ?: cleanRawTokens(buffer.toString())
+            result.takeIf { it.isNotBlank() }
+        } catch (t: Throwable) {
+            Log.w(TAG, "Generation interrupted or failed: ${t.message}")
+            cleanRawTokens(buffer.toString()).takeIf { it.isNotBlank() }
+        } finally {
+            runCatching { session.close() }
+            if (activeSession === session) {
+                activeSession = null
             }
         }
     }
@@ -346,7 +433,7 @@ object OnDeviceLlmEngine {
         userPrompt: String,
         webContext: String
     ): String {
-        val compactSystem = systemInstruction.take(900)
+        val compactSystem = systemInstruction.take(750)
         val promptWithWeb = if (webContext.isNotBlank()) {
             "$userPrompt\n\nVerified Web Context (use these facts to answer clearly in your own words):\n${webContext.take(1200)}"
         } else {
@@ -363,7 +450,7 @@ object OnDeviceLlmEngine {
                 append("\n\n")
                 recent.forEach { msg ->
                     val role = if (msg.isUser) "User" else "Assistant"
-                    append("$role: ${CloudModelResolver.stripHeaderFromHistoryText(msg.text).take(300)}\n")
+                    append("$role: ${CloudModelResolver.stripHeaderFromHistoryText(msg.text).take(260)}\n")
                 }
                 append(promptWithWeb)
                 append("<end_of_turn>\n<start_of_turn>model\n")
@@ -376,7 +463,7 @@ object OnDeviceLlmEngine {
                 recent.forEach { msg ->
                     val role = if (msg.isUser) "User" else "Assistant"
                     append("<extra_id_1>$role\n")
-                    append(CloudModelResolver.stripHeaderFromHistoryText(msg.text).take(300))
+                    append(CloudModelResolver.stripHeaderFromHistoryText(msg.text).take(260))
                     append("\n")
                 }
                 append("<extra_id_1>User\n")
@@ -391,7 +478,7 @@ object OnDeviceLlmEngine {
                 recent.forEach { msg ->
                     val role = if (msg.isUser) "user" else "assistant"
                     append("<|start_header_id|>$role<|end_header_id|>\n\n")
-                    append(CloudModelResolver.stripHeaderFromHistoryText(msg.text).take(300))
+                    append(CloudModelResolver.stripHeaderFromHistoryText(msg.text).take(260))
                     append("<|eot_id|>")
                 }
                 append("<|start_header_id|>user<|end_header_id|>\n\n")
@@ -403,7 +490,7 @@ object OnDeviceLlmEngine {
                 append("<|system|>$compactSystem<|end|>")
                 recent.forEach { msg ->
                     val tag = if (msg.isUser) "user" else "assistant"
-                    append("<|$tag|>${CloudModelResolver.stripHeaderFromHistoryText(msg.text).take(300)}<|end|>")
+                    append("<|$tag|>${CloudModelResolver.stripHeaderFromHistoryText(msg.text).take(260)}<|end|>")
                 }
                 append("<|user|>$promptWithWeb<|end|><|assistant|>")
             }
@@ -415,7 +502,7 @@ object OnDeviceLlmEngine {
                 recent.forEach { msg ->
                     val role = if (msg.isUser) "user" else "assistant"
                     append("<|im_start|>$role\n")
-                    append(CloudModelResolver.stripHeaderFromHistoryText(msg.text).take(300))
+                    append(CloudModelResolver.stripHeaderFromHistoryText(msg.text).take(260))
                     append("<|im_end|>\n")
                 }
                 append("<|im_start|>user\n")

@@ -4,6 +4,7 @@ import com.shamia.assistant.engine.ModelCatalog
 import com.shamia.assistant.engine.ModelDownloadManager
 import com.shamia.assistant.model.AlarmItem
 import com.shamia.assistant.model.AmbientTrack
+import com.shamia.assistant.model.AppThemeMode
 import com.shamia.assistant.model.CoreVisualState
 import com.shamia.assistant.model.DeviceControlState
 import com.shamia.assistant.model.DeviceHardwareSpec
@@ -11,6 +12,7 @@ import com.shamia.assistant.model.DeviceTelemetry
 import com.shamia.assistant.model.HudMessage
 import com.shamia.assistant.model.NoteItem
 import com.shamia.assistant.model.OpenSourceModelSpec
+import com.shamia.assistant.model.PendingAction
 import com.shamia.assistant.model.PermissionCapability
 import com.shamia.assistant.model.PermissionPolicy
 import com.shamia.assistant.model.RoutineItem
@@ -35,8 +37,10 @@ data class ShamiaUiState(
     val isGenerating: Boolean = false,
     val liveTranscript: String = "",
     val voiceReplyEnabled: Boolean = true,
+    val handsFreeVoiceMode: Boolean = false,
     val interactionSoundEnabled: Boolean = true,
     val voiceGender: VoiceGender = VoiceGender.FEMALE,
+    val themeMode: AppThemeMode = AppThemeMode.DARK,
     val showAllModels: Boolean = false,
     val useResearch: Boolean = false,
     val selectedModelId: String = "offline-core",
@@ -46,6 +50,10 @@ data class ShamiaUiState(
     val customModels: List<OpenSourceModelSpec> = emptyList(),
     val installedModelIds: Set<String> = setOf("offline-core"),
     val modelDownloadProgress: Map<String, Pair<Int, String>> = emptyMap(),
+    val partialDownloadPercents: Map<String, Int> = emptyMap(),
+    val loadedInRamModelId: String? = null,
+    val loadingInRamModelId: String? = null,
+    val loadedBackendLabel: String = "",
     val installedVoiceIds: Set<String> = emptySet(),
     val voiceDownloadProgress: Map<String, Pair<Int, String>> = emptyMap(),
     val ollamaEndpoint: String = "http://127.0.0.1:11434",
@@ -57,6 +65,8 @@ data class ShamiaUiState(
     val syllabus: List<SyllabusItem> = emptyList(),
     val alarms: List<AlarmItem> = emptyList(),
     val controls: DeviceControlState = DeviceControlState(),
+    val screenTorchActive: Boolean = false,
+    val pendingModalAction: Pair<String, PendingAction>? = null,
     val musicActive: Boolean = false,
     val musicPlaying: Boolean = false,
     val activeTrackIndex: Int = 0,

@@ -117,6 +117,14 @@ fun QuantumCore(
         label = "pulse"
     )
 
+    val isLight = com.shamia.assistant.ui.theme.isLightShamiaTheme
+    val dialPlateColor = if (isLight) Color(0xFFF1F5FD) else Color(0xFF0B131E)
+    val cavityColor = if (isLight) Color(0xFFE8F0FE) else Color(0xFF050A11)
+    val glowMidColor = if (isLight) Color(0xFFD2E3FC).copy(alpha = 0.45f) else Color(0xFF0A1420).copy(alpha = 0.35f)
+    val sphereOuterDark = if (isLight) Color(0xFF174EA6) else Color(0xFF082F49)
+    val sphereMidDark = if (isLight) Color(0xFF1967D2) else Color(0xFF0369A1)
+    val sphereInnerLight = if (isLight) Color(0xFF8AB4F8) else Color(0xFF7DD3FC)
+
     val orbSize = if (compact) 74.dp else 168.dp
 
     Column(
@@ -145,12 +153,12 @@ fun QuantumCore(
                 val center = Offset(size.width / 2f, size.height / 2f)
                 val r = size.minDimension / 2f
 
-                // 1. Soft atmospheric ambient cyan glow
+                // 1. Soft atmospheric ambient glow
                 drawCircle(
                     brush = Brush.radialGradient(
                         colors = listOf(
                             accent.copy(alpha = 0.22f * pulse),
-                            Color(0xFF0A1420).copy(alpha = 0.35f),
+                            glowMidColor,
                             Color.Transparent
                         ),
                         center = center,
@@ -160,20 +168,20 @@ fun QuantumCore(
                     center = center
                 )
 
-                // 2. Dark obsidian outer instrument dial plate + thin precision rim
+                // 2. Outer instrument dial plate + thin precision rim
                 drawCircle(
-                    color = Color(0xFF0B131E),
+                    color = dialPlateColor,
                     radius = r * 0.90f,
                     center = center
                 )
                 drawCircle(
-                    color = accent.copy(alpha = 0.26f),
+                    color = accent.copy(alpha = if (isLight) 0.38f else 0.26f),
                     radius = r * 0.90f,
                     center = center,
                     style = Stroke(width = if (compact) 1.2f else 1.8f)
                 )
 
-                // 3. 60 Precision chronometer ticks (12 major cyan ticks + 48 fine ticks)
+                // 3. 60 Precision chronometer ticks (12 major ticks + 48 fine ticks)
                 for (i in 0 until 60) {
                     val deg = i * 6.0
                     val rad = deg * PI / 180.0
@@ -181,7 +189,7 @@ fun QuantumCore(
                     val rStart = r * (if (isMajor) 0.77f else 0.82f)
                     val rEnd = r * 0.865f
                     drawLine(
-                        color = accent.copy(alpha = if (isMajor) 0.75f else 0.22f),
+                        color = accent.copy(alpha = if (isMajor) 0.75f else 0.24f),
                         start = Offset(
                             center.x + (rStart * cos(rad)).toFloat(),
                             center.y + (rStart * sin(rad)).toFloat()
@@ -202,7 +210,7 @@ fun QuantumCore(
                     val arcSize = Size(orbitR * 2f, orbitR * 2f)
 
                     drawArc(
-                        color = accent.copy(alpha = 0.72f),
+                        color = accent.copy(alpha = 0.76f),
                         startAngle = 215f,
                         sweepAngle = 72f,
                         useCenter = false,
@@ -211,7 +219,7 @@ fun QuantumCore(
                         style = Stroke(width = if (compact) 1.5f else 2.4f, cap = StrokeCap.Round)
                     )
                     drawArc(
-                        color = accent.copy(alpha = 0.52f),
+                        color = accent.copy(alpha = 0.56f),
                         startAngle = 315f,
                         sweepAngle = 58f,
                         useCenter = false,
@@ -220,7 +228,7 @@ fun QuantumCore(
                         style = Stroke(width = if (compact) 1.4f else 2.2f, cap = StrokeCap.Round)
                     )
                     drawArc(
-                        color = accent.copy(alpha = 0.72f),
+                        color = accent.copy(alpha = 0.76f),
                         startAngle = 38f,
                         sweepAngle = 68f,
                         useCenter = false,
@@ -229,7 +237,7 @@ fun QuantumCore(
                         style = Stroke(width = if (compact) 1.5f else 2.4f, cap = StrokeCap.Round)
                     )
                     drawArc(
-                        color = accent.copy(alpha = 0.45f),
+                        color = accent.copy(alpha = 0.48f),
                         startAngle = 135f,
                         sweepAngle = 48f,
                         useCenter = false,
@@ -238,11 +246,10 @@ fun QuantumCore(
                         style = Stroke(width = if (compact) 1.3f else 2.0f, cap = StrokeCap.Round)
                     )
 
-                    // Glowing orbital satellite dots along the orbit path
                     val node1Rad = 262.0 * PI / 180.0
                     val node2Rad = 82.0 * PI / 180.0
                     drawCircle(
-                        color = Color(0xFFBAE6FD),
+                        color = if (isLight) accent else Color(0xFFBAE6FD),
                         radius = if (compact) 2.2f else 3.8f,
                         center = Offset(
                             center.x + (orbitR * cos(node1Rad)).toFloat(),
@@ -262,7 +269,7 @@ fun QuantumCore(
                 // 5. Counter-rotating inner micro-dashed orbital ring
                 rotate(degrees = midOrbitAngle, pivot = center) {
                     drawCircle(
-                        color = accent.copy(alpha = 0.36f),
+                        color = accent.copy(alpha = 0.40f),
                         radius = r * 0.56f,
                         center = center,
                         style = Stroke(
@@ -273,14 +280,14 @@ fun QuantumCore(
                     )
                 }
 
-                // 6. Deep dark inner core cavity + crisp cyan aperture ring
+                // 6. Inner core cavity + crisp aperture ring
                 drawCircle(
-                    color = Color(0xFF050A11),
+                    color = cavityColor,
                     radius = r * 0.44f,
                     center = center
                 )
                 drawCircle(
-                    color = accent.copy(alpha = 0.58f),
+                    color = accent.copy(alpha = 0.62f),
                     radius = r * 0.44f,
                     center = center,
                     style = Stroke(width = if (compact) 1.4f else 2.2f)
@@ -292,10 +299,10 @@ fun QuantumCore(
                     brush = Brush.radialGradient(
                         colors = listOf(
                             Color.White,
-                            Color(0xFF7DD3FC),
+                            sphereInnerLight,
                             accent,
-                            Color(0xFF0369A1),
-                            Color(0xFF082F49)
+                            sphereMidDark,
+                            sphereOuterDark
                         ),
                         center = Offset(center.x - sphereR * 0.14f, center.y - sphereR * 0.16f),
                         radius = sphereR * 1.15f

@@ -77,6 +77,11 @@ enum class VoiceGender(val label: String) {
     MALE("Male (Clear)")
 }
 
+enum class AppThemeMode(val label: String) {
+    DARK("Obsidian Dark"),
+    LIGHT("Google White")
+}
+
 enum class RoutineCategory(val label: String) {
     ROUTINE("Routine"),
     CLASS("Class"),

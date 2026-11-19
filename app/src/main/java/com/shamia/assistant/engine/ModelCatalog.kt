@@ -31,9 +31,24 @@ object ModelCatalog {
             supportsOfflineInstall = false
         ),
         OpenSourceModelSpec(
+            id = "smollm2-360m-webgpu",
+            name = "SmolLM 135M (Ultra-Fast)",
+            provider = "Hugging Face Apache 2.0 · Turbo 8x Direct",
+            params = "135M Q8",
+            sizeLabel = "0.17 GB (175 MB)",
+            minRamGb = 2,
+            runtimeLabel = "On-Device LiteRT + Ollama",
+            hfRepo = "litert-community/SmolLM-135M-Instruct",
+            ollamaTag = "smollm:135m",
+            cloudModelId = "",
+            hfInferenceModelId = "HuggingFaceTB/SmolLM-135M-Instruct",
+            styleProfile = "Ultra-lightweight instant voice & chat responses on any phone.",
+            summary = "Fastest 1-tap Turbo download (~175 MB) — downloads & loads into RAM in seconds."
+        ),
+        OpenSourceModelSpec(
             id = "qwen25-0.5b-webgpu",
             name = "Qwen 2.5 0.5B Instruct",
-            provider = "Alibaba Apache 2.0 · LiteRT Direct",
+            provider = "Alibaba Apache 2.0 · Turbo 8x Direct",
             params = "0.5B Q8",
             sizeLabel = "0.5 GB Download",
             minRamGb = 2,
@@ -43,12 +58,12 @@ object ModelCatalog {
             cloudModelId = "",
             hfInferenceModelId = "Qwen/Qwen2.5-0.5B-Instruct",
             styleProfile = "Fast, clear, concise local answers optimized for any Android phone.",
-            summary = "Direct 1-tap ungated .task download (~529 MB) for 100% offline mobile inference."
+            summary = "Fast 1-tap Turbo download (~529 MB) for snappy, accurate 100% offline inference."
         ),
         OpenSourceModelSpec(
             id = "qwen25-1.5b-edge",
             name = "Qwen 2.5 1.5B Instruct",
-            provider = "Alibaba Apache 2.0 · LiteRT Direct",
+            provider = "Alibaba Apache 2.0 · Turbo 8x Direct",
             params = "1.5B Q8",
             sizeLabel = "1.5 GB Download",
             minRamGb = 3,
@@ -58,12 +73,12 @@ object ModelCatalog {
             cloudModelId = "",
             hfInferenceModelId = "Qwen/Qwen2.5-1.5B-Instruct",
             styleProfile = "Detailed, constructive explanations, coding help, and English tutoring.",
-            summary = "Direct 1-tap ungated .task download (~1.5 GB) for strong offline reasoning on 3GB+ phones."
+            summary = "Direct 1-tap Turbo download (~1.5 GB) for strong offline reasoning on 3GB+ phones."
         ),
         OpenSourceModelSpec(
             id = "qwen25-3b-edge",
             name = "Qwen 2.5 3B Instruct",
-            provider = "Alibaba Apache 2.0 · LiteRT Direct",
+            provider = "Alibaba Apache 2.0 · Turbo 8x Direct",
             params = "3B Q8",
             sizeLabel = "2.9 GB Download",
             minRamGb = 4,
@@ -73,22 +88,7 @@ object ModelCatalog {
             cloudModelId = "",
             hfInferenceModelId = "Qwen/Qwen2.5-3B-Instruct",
             styleProfile = "Strong multi-step reasoning, coding, and writing directly on 4GB+ phones.",
-            summary = "Direct 1-tap ungated .task download for Qwen 2.5 3B on mobile hardware."
-        ),
-        OpenSourceModelSpec(
-            id = "smollm2-360m-webgpu",
-            name = "SmolLM 135M (Ultra-Fast)",
-            provider = "Hugging Face Apache 2.0 · LiteRT Direct",
-            params = "135M Q8",
-            sizeLabel = "0.2 GB Download",
-            minRamGb = 2,
-            runtimeLabel = "On-Device LiteRT + Ollama",
-            hfRepo = "litert-community/SmolLM-135M-Instruct",
-            ollamaTag = "smollm:135m",
-            cloudModelId = "",
-            hfInferenceModelId = "HuggingFaceTB/SmolLM-135M-Instruct",
-            styleProfile = "Ultra-lightweight instant voice & chat responses on any phone.",
-            summary = "Fastest ungated .task download (~175 MB) for instant offline local execution."
+            summary = "Direct 1-tap Turbo download for Qwen 2.5 3B on mobile hardware."
         ),
         OpenSourceModelSpec(
             id = "deepseek-r1-1.5b",

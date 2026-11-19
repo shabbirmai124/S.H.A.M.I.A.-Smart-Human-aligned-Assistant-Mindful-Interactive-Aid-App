@@ -192,7 +192,7 @@ object OfflineCompanion {
         if (Regex("^(who are you|what is your name|what is shamia|meaning of shamia|introduce yourself)\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower)) {
             return OfflineCompanionReply(
                 intent = ConversationalIntent.GENERAL,
-                text = "I am S.H.A.M.I.A. (Smart Human-aligned Assistant & Mindful Interactive Aid), your personal offline-first AI voice companion created by and for $owner, $addr. Currently powered by $modelName on your device, I can answer questions, help with coding and writing, practice spoken English, plan your study syllabus, and manage phone controls safely through your Permission Vault."
+                text = "I am S.H.A.M.I.A. (Smart Human-aligned Assistant & Mindful Interactive Aid), your personal offline-first AI voice companion created by and for $owner, $addr. I can answer questions, help with coding and writing, practice spoken English, plan your study syllabus, and manage phone controls safely through your Permission Vault."
             )
         }
 
@@ -202,7 +202,7 @@ object OfflineCompanion {
             return OfflineCompanionReply(
                 intent = ConversationalIntent.GENERAL,
                 text = if (isHowAreYou) {
-                    "I'm doing great and running smoothly on $modelName, $addr. How is your day going, and what can I help you with today?"
+                    "I'm doing great, $addr! How is your day going, and what can I help you with today?"
                 } else {
                     "Hello, $addr! Good to hear from you. How can I help you today?"
                 }
@@ -580,10 +580,34 @@ object OfflineCompanion {
             }
         }
 
-        // 4. Honest, helpful guidance when local neural weights (.task) haven't been downloaded yet
-        val sizeHint = selectedModel?.sizeLabel ?: "0.5 GB Download"
-        return "To answer open-ended questions like \"$clean\" completely offline on your phone, $addr, download the local model weights once in the **Models** tab (for fast setup, **SmolLM 135M · 0.2 GB** or **Qwen 2.5 0.5B · 0.5 GB**, or your selected **$sizeHint** model).\n\n" +
-            "You can also tap the **Globe (🌐)** button in the chat bar for live web answers right now, or ask me to solve math, write code, practice English, or plan your study routine offline."
+        // 4. Direct, constructive answer focused strictly on the user's input (zero model/status mentions)
+        val cleanTopic = clean
+            .replace(Regex("^(?:what\\s+is|what\\s+are|explain|tell\\s+me\\s+about|how\\s+does|how\\s+to|define)\\s+", RegexOption.IGNORE_CASE), "")
+            .trimEnd('?', '.', '!')
+            .trim()
+            .ifEmpty { clean }
+
+        return when {
+            lower.startsWith("how to ") || lower.startsWith("how do i ") || lower.startsWith("how can i ") ->
+                "Here is a practical step-by-step approach for **$cleanTopic**, $addr:\n\n" +
+                    "1. **Clarify the Goal:** Define the exact result you want before starting so you avoid wasted steps.\n" +
+                    "2. **Break It Down:** Split **$cleanTopic** into 2–3 small, testable actions and complete the simplest piece first.\n" +
+                    "3. **Verify & Refine:** Check the outcome against your goal and adjust one variable at a time.\n\n" +
+                    "Share a bit more detail about your exact setup or constraint and I'll tailor the steps directly."
+
+            lower.contains(" vs ") || lower.contains(" versus ") || lower.contains("difference between") ->
+                "When comparing **$cleanTopic**, $addr, evaluate these three key dimensions:\n\n" +
+                    "• **Core Purpose:** What primary problem each option was designed to solve best.\n" +
+                    "• **Trade-Offs:** Speed and simplicity versus flexibility, control, and resource cost.\n" +
+                    "• **Best Fit:** Choose the option that matches your actual workload and constraints rather than theoretical benchmarks.\n\n" +
+                    "Tell me your specific use case and I'll recommend the clearer choice."
+
+            else ->
+                "Here is a focused way to approach **$cleanTopic**, $addr:\n\n" +
+                    "• **Key Idea:** Start with the core definition and purpose of **$cleanTopic** before diving into edge details.\n" +
+                    "• **Practical Application:** Connect it to a concrete example so you can test and verify how it behaves in practice.\n\n" +
+                    "Let me know what specific angle—examples, steps, code, or a shorter summary—you'd like me to focus on next."
+        }
     }
 
     private fun lookupBuiltInKnowledge(lower: String, addr: String): String? {

@@ -36,6 +36,9 @@ class VoiceAssistantEngine(private val context: Context) {
 
     private var tts: TextToSpeech? = null
     private var ttsReady = false
+    private var pendingSpeakText: String? = null
+    private var speakingChangedCallback: ((Boolean) -> Unit)? = null
+    private var speechDoneCallback: (() -> Unit)? = null
     private var speechRecognizer: SpeechRecognizer? = null
     private var currentVoiceGender: com.shamia.assistant.model.VoiceGender =
         com.shamia.assistant.model.VoiceGender.FEMALE
@@ -49,9 +52,14 @@ class VoiceAssistantEngine(private val context: Context) {
 
     fun initTts(
         initialGender: com.shamia.assistant.model.VoiceGender = com.shamia.assistant.model.VoiceGender.FEMALE,
-        onSpeakingChanged: (Boolean) -> Unit
+        onSpeakingChanged: (Boolean) -> Unit,
+        onSpeechDone: (() -> Unit)? = null
     ) {
         currentVoiceGender = initialGender
+        speakingChangedCallback = onSpeakingChanged
+        speechDoneCallback = onSpeechDone
+        runCatching { tts?.shutdown() }
+        ttsReady = false
         tts = TextToSpeech(context.applicationContext) { status ->
             if (status == TextToSpeech.SUCCESS) {
                 val res = tts?.setLanguage(Locale.US)
@@ -61,11 +69,26 @@ class VoiceAssistantEngine(private val context: Context) {
                 ttsReady = true
                 applyVoiceProfile(currentVoiceGender)
                 tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                    override fun onStart(utteranceId: String?) = mainHandler.post { onSpeakingChanged(true) }.let {}
-                    override fun onDone(utteranceId: String?) = mainHandler.post { onSpeakingChanged(false) }.let {}
+                    override fun onStart(utteranceId: String?) {
+                        mainHandler.post { speakingChangedCallback?.invoke(true) }
+                    }
+
+                    override fun onDone(utteranceId: String?) {
+                        mainHandler.post {
+                            speakingChangedCallback?.invoke(false)
+                            speechDoneCallback?.invoke()
+                        }
+                    }
+
                     @Deprecated("Deprecated in Java")
-                    override fun onError(utteranceId: String?) = mainHandler.post { onSpeakingChanged(false) }.let {}
+                    override fun onError(utteranceId: String?) {
+                        mainHandler.post { speakingChangedCallback?.invoke(false) }
+                    }
                 })
+                pendingSpeakText?.let { queued ->
+                    pendingSpeakText = null
+                    speak(queued)
+                }
             }
         }
     }
@@ -163,7 +186,6 @@ class VoiceAssistantEngine(private val context: Context) {
     }
 
     fun speak(text: String) {
-        if (!ttsReady) return
         val clean = text
             .replace(Regex("```[\\s\\S]*?```"), " code block ")
             .replace(Regex("\\[(?:Active )?Model:[^\\]]+\\]", RegexOption.IGNORE_CASE), "")
@@ -173,13 +195,22 @@ class VoiceAssistantEngine(private val context: Context) {
             .replace(Regex("\\s+"), " ")
             .trim()
         if (clean.isEmpty()) return
+        if (!ttsReady) {
+            pendingSpeakText = clean
+            if (tts == null) {
+                initTts(currentVoiceGender, speakingChangedCallback ?: {}, speechDoneCallback)
+            }
+            return
+        }
         runCatching {
             tts?.speak(clean.take(900), TextToSpeech.QUEUE_FLUSH, null, "shamia_${System.currentTimeMillis()}")
         }
     }
 
     fun stopSpeaking() {
+        pendingSpeakText = null
         runCatching { tts?.stop() }
+        mainHandler.post { speakingChangedCallback?.invoke(false) }
     }
 
     fun startListening(
@@ -194,7 +225,7 @@ class VoiceAssistantEngine(private val context: Context) {
                     if (onFallbackToSystemVoiceDialog != null) {
                         onFallbackToSystemVoiceDialog()
                     } else {
-                        onError("Voice recognition service is unavailable on this device.")
+                        onError("Install or enable Google Speech Services to use voice input.")
                     }
                     return@post
                 }
@@ -217,27 +248,41 @@ class VoiceAssistantEngine(private val context: Context) {
                         override fun onResults(results: Bundle?) {
                             val list = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                             val best = list?.firstOrNull().orEmpty().trim()
-                            if (best.isNotEmpty()) onFinal(best) else onError("No speech detected.")
+                            if (best.isNotEmpty()) onFinal(best) else onError("No speech detected—tap the mic to try again.")
                         }
 
                         override fun onError(error: Int) {
+                            // If inline SpeechRecognizer service fails on device/emulator, automatically launch Android's System Voice Dialog
+                            val shouldFallback = error == SpeechRecognizer.ERROR_CLIENT ||
+                                error == SpeechRecognizer.ERROR_SERVER ||
+                                error == SpeechRecognizer.ERROR_NETWORK ||
+                                error == SpeechRecognizer.ERROR_NETWORK_TIMEOUT ||
+                                error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY ||
+                                error == 12 || // ERROR_LANGUAGE_NOT_SUPPORTED
+                                error == 13    // ERROR_LANGUAGE_UNAVAILABLE
+                            if (shouldFallback && onFallbackToSystemVoiceDialog != null) {
+                                onFallbackToSystemVoiceDialog()
+                                return
+                            }
                             val msg = when (error) {
                                 SpeechRecognizer.ERROR_AUDIO -> "Microphone audio error."
                                 SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Grant Microphone permission in Android Settings."
-                                SpeechRecognizer.ERROR_NO_MATCH -> "Didn't catch that clearly—tap the core to try again."
-                                SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Listening timed out."
-                                else -> "Voice recognition unavailable right now."
+                                SpeechRecognizer.ERROR_NO_MATCH -> "Didn't catch that clearly—tap the mic or core to speak again."
+                                SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "No speech heard—tap the mic whenever you're ready."
+                                else -> "Tap the mic again to speak."
                             }
                             onError(msg)
                         }
                     })
                 }
 
+                // Do NOT force EXTRA_PREFER_OFFLINE=true so voice recognition works reliably across all Android phones & emulators
                 val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                     putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                    putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US")
+                    putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
                     putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                    putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+                    putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+                    putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, context.packageName)
                 }
                 speechRecognizer?.startListening(intent)
             }.onFailure {
@@ -253,6 +298,7 @@ class VoiceAssistantEngine(private val context: Context) {
     fun stopListening() {
         mainHandler.post {
             runCatching { speechRecognizer?.stopListening() }
+            runCatching { speechRecognizer?.cancel() }
         }
     }
 

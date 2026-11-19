@@ -20,6 +20,7 @@ import com.shamia.assistant.engine.ShamiaStateDelegates
 import com.shamia.assistant.engine.VoiceAssistantEngine
 import com.shamia.assistant.model.ActionStatus
 import com.shamia.assistant.model.AlarmItem
+import com.shamia.assistant.model.AppThemeMode
 import com.shamia.assistant.model.ConversationalIntent
 import com.shamia.assistant.model.CoreVisualState
 import com.shamia.assistant.model.DeviceActionType
@@ -55,12 +56,15 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
 
     private var generationJob: Job? = null
     private var streamingMessageId: String? = null
+    private var lastFallbackVoiceDialog: (() -> Unit)? = null
 
     init {
         viewModelScope.launch(Dispatchers.IO) {
             val identity = store.loadIdentity()
             val hardware = OpenSourceAiRepository.detectHardware(application)
-            val controls = store.loadControls()
+            val loadedControls = store.loadControls()
+            val realDnd = DeviceExecutor.readSystemDndEnabled(application)
+            val controls = if (realDnd != null) loadedControls.copy(dnd = realDnd) else loadedControls
             val selectedModelId = store.loadSelectedModelId()
             val customModels = store.loadCustomModels()
             val allModels = ModelCatalog.CATALOG + customModels
@@ -68,12 +72,14 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
             val savedSpec = allModels.find { it.id == selectedModelId } ?: recommended
             val initialSession = "session-${System.currentTimeMillis()}"
             val initialGender = VoiceGender.entries.firstOrNull { it.name == store.loadVoiceGender() } ?: VoiceGender.FEMALE
+            val initialTheme = AppThemeMode.entries.firstOrNull { it.name == store.loadThemeMode() } ?: AppThemeMode.DARK
             val soundEnabled = store.loadInteractionSoundEnabled()
             voiceEngine.setInteractionSoundEnabled(soundEnabled)
 
             val verifiedInstalled = (store.loadInstalledModelIds() + setOf("offline-core"))
                 .filter { id -> id == "offline-core" || OnDeviceLlmEngine.hasRealLocalWeights(application, id) }
                 .toSet()
+            val partials = ModelDownloadManager.scanAllPartialDownloadPercents(application, allModels.map { it.id })
 
             _ui.update {
                 it.copy(
@@ -89,10 +95,12 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
                     permissions = store.loadPermissions(),
                     customModels = customModels,
                     installedModelIds = verifiedInstalled,
+                    partialDownloadPercents = partials,
                     installedVoiceIds = store.loadInstalledVoiceIds(),
                     selectedModelId = savedSpec.id,
                     recommendedModelId = recommended.id,
                     voiceGender = initialGender,
+                    themeMode = initialTheme,
                     interactionSoundEnabled = soundEnabled,
                     showAllModels = store.loadShowAllModels(),
                     ensembleEnabled = store.loadEnsembleEnabled(),
@@ -104,15 +112,33 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
                 )
             }
 
-            voiceEngine.initTts(initialGender) { isSpeaking ->
-                _ui.update { state ->
-                    state.copy(
-                        coreState = if (isSpeaking) CoreVisualState.SPEAKING
-                        else if (state.coreState == CoreVisualState.SPEAKING) CoreVisualState.IDLE
-                        else state.coreState
-                    )
-                }
+            // Auto pre-warm the active installed neural model in the background for instant offline first-token speed
+            if (!savedSpec.isBuiltInOffline && verifiedInstalled.contains(savedSpec.id)) {
+                ShamiaStateDelegates.preloadModelIntoRam(application, viewModelScope, _ui, savedSpec.id)
             }
+
+            voiceEngine.initTts(
+                initialGender = initialGender,
+                onSpeakingChanged = { isSpeaking ->
+                    _ui.update { state ->
+                        state.copy(
+                            coreState = if (isSpeaking) CoreVisualState.SPEAKING
+                            else if (state.coreState == CoreVisualState.SPEAKING) CoreVisualState.IDLE
+                            else state.coreState
+                        )
+                    }
+                },
+                onSpeechDone = {
+                    if (_ui.value.handsFreeVoiceMode && !_ui.value.isGenerating && _ui.value.coreState != CoreVisualState.LISTENING) {
+                        viewModelScope.launch {
+                            delay(350L)
+                            if (_ui.value.handsFreeVoiceMode && !_ui.value.isGenerating) {
+                                startVoiceCaptureInternal(lastFallbackVoiceDialog)
+                            }
+                        }
+                    }
+                }
+            )
         }
 
         viewModelScope.launch {
@@ -178,10 +204,11 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
             } else state.messages
             state.copy(
                 isGenerating = false,
+                handsFreeVoiceMode = false,
                 coreState = CoreVisualState.IDLE,
                 liveTranscript = "",
                 messages = updatedMessages,
-                statusBanner = "Stopped."
+                statusBanner = null
             )
         }
     }
@@ -198,7 +225,12 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
         voiceEngine.stopSpeaking()
         val chosen = _ui.value.allModels.find { it.id == modelId } ?: _ui.value.selectedModel
         store.saveSelectedModelId(chosen.id)
-        viewModelScope.launch { OnDeviceLlmEngine.unloadIfDifferent(chosen.id) }
+        viewModelScope.launch {
+            OnDeviceLlmEngine.unloadIfDifferent(chosen.id)
+            if (!chosen.isBuiltInOffline && OnDeviceLlmEngine.hasRealLocalWeights(getApplication(), chosen.id)) {
+                ShamiaStateDelegates.preloadModelIntoRam(getApplication(), viewModelScope, _ui, chosen.id)
+            }
+        }
         val freshSession = "session-${System.currentTimeMillis()}"
         _ui.update {
             it.copy(
@@ -208,7 +240,7 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
                 coreState = CoreVisualState.IDLE,
                 liveTranscript = "",
                 messages = listOf(buildWelcomeMessage(it.identity, chosen, freshSession)),
-                statusBanner = "Switched to ${chosen.name} (${chosen.sizeLabel})."
+                statusBanner = null
             )
         }
     }
@@ -216,8 +248,13 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
     fun selectModel(modelId: String) {
         val chosen = _ui.value.allModels.find { it.id == modelId } ?: return
         store.saveSelectedModelId(chosen.id)
-        viewModelScope.launch { OnDeviceLlmEngine.unloadIfDifferent(chosen.id) }
-        Log.i("ShamiaModelRouter", "STRICT MODEL SWITCH -> id=${chosen.id}, name=${chosen.name}")
+        viewModelScope.launch {
+            OnDeviceLlmEngine.unloadIfDifferent(chosen.id)
+            if (!chosen.isBuiltInOffline && OnDeviceLlmEngine.hasRealLocalWeights(getApplication(), chosen.id)) {
+                ShamiaStateDelegates.preloadModelIntoRam(getApplication(), viewModelScope, _ui, chosen.id)
+            }
+        }
+        Log.i("ShamiaModelRouter", "MODEL SWITCH -> id=${chosen.id}, name=${chosen.name}")
         _ui.update { state ->
             val updatedMessages = if (state.messages.size == 1 && state.messages.first().id.startsWith("welcome-")) {
                 listOf(buildWelcomeMessage(state.identity, chosen, state.chatSessionId))
@@ -227,7 +264,7 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
             state.copy(
                 selectedModelId = chosen.id,
                 messages = updatedMessages,
-                statusBanner = "Active model: ${chosen.name} (${chosen.sizeLabel})."
+                statusBanner = null
             )
         }
     }
@@ -253,6 +290,22 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
                 modelIdForTurn = activeSpec.id
             )
         )
+
+        val lowerPrompt = text.lowercase(Locale.US)
+        if (Regex("\\b(white\\s+(?:theme|mode|background|color)|light\\s+(?:theme|mode)|google\\s+white)\\b").containsMatchIn(lowerPrompt)) {
+            setThemeMode(AppThemeMode.LIGHT)
+            val reply = "Switched to Google White light mode, $addr."
+            appendMessage(HudMessage("a-${System.currentTimeMillis()}", false, reply, nowLabel(), currentSession, activeSpec.id, ConversationalIntent.DEVICE_ACTION, MessageSource.OFFLINE_CORE, activeSpec.name))
+            if (_ui.value.voiceReplyEnabled) voiceEngine.speak(reply)
+            return
+        }
+        if (Regex("\\b(dark\\s+(?:theme|mode|background)|obsidian\\s+(?:theme|mode|dark)|black\\s+background)\\b").containsMatchIn(lowerPrompt)) {
+            setThemeMode(AppThemeMode.DARK)
+            val reply = "Switched back to Obsidian Dark mode, $addr."
+            appendMessage(HudMessage("a-${System.currentTimeMillis()}", false, reply, nowLabel(), currentSession, activeSpec.id, ConversationalIntent.DEVICE_ACTION, MessageSource.OFFLINE_CORE, activeSpec.name))
+            if (_ui.value.voiceReplyEnabled) voiceEngine.speak(reply)
+            return
+        }
 
         val local = IntentEngine.matchLocalIntent(
             input = text,
@@ -315,6 +368,26 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
         )
         _ui.update { it.copy(coreState = CoreVisualState.THINKING, isGenerating = true) }
 
+        // Quietly auto-download & preload direct ungated weights in background if not yet installed (no popups or status text!)
+        val isDirectUngated = !activeSpec.isBuiltInOffline &&
+            activeSpec.hfRepo?.startsWith("litert-community/", ignoreCase = true) == true &&
+            !activeSpec.id.contains("gemma") && !activeSpec.id.contains("llama")
+        if (isDirectUngated &&
+            state.telemetry.isOnline &&
+            !state.installedModelIds.contains(activeSpec.id) &&
+            !state.modelDownloadProgress.containsKey(activeSpec.id) &&
+            ModelDownloadManager.isSafeForLocalInstall(activeSpec, state.hardware)
+        ) {
+            ShamiaStateDelegates.installOrRemoveModel(
+                app = getApplication(),
+                scope = viewModelScope,
+                ui = _ui,
+                store = store,
+                modelId = activeSpec.id,
+                silent = true
+            )
+        }
+
         generationJob = viewModelScope.launch {
             val activeTasks = _ui.value.tasks.filter { !it.completed }.map { it.title }
             var streamedNatively = false
@@ -367,7 +440,7 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
             }
 
             val (cleanText, extractedTip) = ShamiaPrompts.extractCoachingTip(result.replyText)
-            val fallbackTip = if (extractedTip == null && result.executionMeta.verifiedExactModel && activeSpec.isBuiltInOffline && intent == ConversationalIntent.ENGLISH_TUTOR) {
+            val fallbackTip = if (extractedTip == null && intent == ConversationalIntent.ENGLISH_TUTOR) {
                 OfflineCompanion.generateReply(text, addr, _ui.value.identity.fullName, _ui.value.routine, _ui.value.syllabus, activeSpec).coachingTip
             } else extractedTip
 
@@ -397,6 +470,8 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
                 s.copy(
                     isGenerating = false,
                     coreState = CoreVisualState.IDLE,
+                    loadedInRamModelId = OnDeviceLlmEngine.currentLoadedModelId() ?: s.loadedInRamModelId,
+                    loadedBackendLabel = OnDeviceLlmEngine.currentLoadedBackend().ifBlank { s.loadedBackendLabel },
                     messages = s.messages.map { m ->
                         if (m.id == msgId) {
                             m.copy(
@@ -427,23 +502,35 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun stageOrExecuteAction(action: PendingAction, promptText: String) {
+    fun stageOrExecuteAction(action: PendingAction, promptText: String, showModalOnAsk: Boolean = false) {
         val policy = IntentEngine.evaluatePermission(_ui.value.permissions, action.capability)
         val addr = _ui.value.identity.addressAs.ifBlank { "Sir" }
         val sessionId = _ui.value.chatSessionId
 
         when (policy) {
-            PermissionPolicy.DENY -> appendMessage(
-                HudMessage("a-${System.currentTimeMillis()}", false, "Blocked by Permission Vault (${action.capability.label} is Deny), $addr.", nowLabel(), sessionId, source = MessageSource.PERMISSION_GATE, pendingAction = action.copy(status = ActionStatus.BLOCKED))
-            )
+            PermissionPolicy.DENY -> {
+                val blockedText = "Blocked by Permission Vault (${action.capability.label} is Deny), $addr."
+                appendMessage(
+                    HudMessage("a-${System.currentTimeMillis()}", false, blockedText, nowLabel(), sessionId, source = MessageSource.PERMISSION_GATE, pendingAction = action.copy(status = ActionStatus.BLOCKED))
+                )
+                _ui.update { it.copy(statusBanner = blockedText) }
+            }
             PermissionPolicy.ALWAYS -> {
                 val execMsg = runApprovedAction(action)
                 appendMessage(HudMessage("a-${System.currentTimeMillis()}", false, execMsg, nowLabel(), sessionId, source = MessageSource.PERMISSION_GATE, pendingAction = action.copy(status = ActionStatus.APPROVED)))
+                _ui.update { it.copy(statusBanner = execMsg) }
                 if (_ui.value.voiceReplyEnabled) voiceEngine.speak(execMsg)
             }
             PermissionPolicy.ASK -> {
-                _ui.update { it.copy(coreState = CoreVisualState.AWAITING_PERMISSION) }
-                appendMessage(HudMessage("a-${System.currentTimeMillis()}", false, promptText, nowLabel(), sessionId, source = MessageSource.PERMISSION_GATE, pendingAction = action.copy(status = ActionStatus.PENDING)))
+                val msgId = "a-${System.currentTimeMillis()}"
+                val stagedAction = action.copy(status = ActionStatus.PENDING)
+                _ui.update {
+                    it.copy(
+                        coreState = CoreVisualState.AWAITING_PERMISSION,
+                        pendingModalAction = if (showModalOnAsk) (msgId to stagedAction) else it.pendingModalAction
+                    )
+                }
+                appendMessage(HudMessage(msgId, false, promptText, nowLabel(), sessionId, source = MessageSource.PERMISSION_GATE, pendingAction = stagedAction))
             }
         }
     }
@@ -461,16 +548,23 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
             action = action,
             currentControls = _ui.value.controls,
             onControlsUpdated = { updated -> store.saveControls(updated); _ui.update { it.copy(controls = updated) } },
-            onBrightnessRequested = { pct -> _ui.update { it.copy(windowBrightnessPct = pct) } }
+            onBrightnessRequested = { pct -> _ui.update { it.copy(windowBrightnessPct = pct) } },
+            onScreenTorchRequested = { on -> _ui.update { it.copy(screenTorchActive = on) } }
         )
+    }
+
+    fun turnOffScreenTorch() {
+        val updated = _ui.value.controls.copy(flashlight = false)
+        store.saveControls(updated)
+        _ui.update { it.copy(screenTorchActive = false, controls = updated, statusBanner = "Torch turned OFF.") }
     }
 
     fun approveActionOnce(messageId: String, phoneOverride: String?) = resolvePendingAction(messageId, phoneOverride, false)
     fun alwaysAllowAction(messageId: String, phoneOverride: String?) = resolvePendingAction(messageId, phoneOverride, true)
 
     private fun resolvePendingAction(messageId: String, phoneOverride: String?, setAlways: Boolean) {
-        val msg = _ui.value.messages.find { it.id == messageId } ?: return
-        val baseAction = msg.pendingAction ?: return
+        val msg = _ui.value.messages.find { it.id == messageId }
+        val baseAction = msg?.pendingAction ?: _ui.value.pendingModalAction?.takeIf { it.first == messageId }?.second ?: return
         val resolvedTarget = if (baseAction.type == DeviceActionType.DIAL_CONTACT && !phoneOverride.isNullOrBlank()) {
             IntentEngine.validatePhoneNumber(phoneOverride) ?: phoneOverride
         } else baseAction.targetValue
@@ -480,6 +574,7 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
         _ui.update { state ->
             state.copy(
                 coreState = CoreVisualState.IDLE,
+                pendingModalAction = if (state.pendingModalAction?.first == messageId) null else state.pendingModalAction,
                 statusBanner = execMsg,
                 messages = state.messages.map { if (it.id == messageId) it.copy(pendingAction = finalAction.copy(status = ActionStatus.APPROVED)) else it }
             )
@@ -488,12 +583,13 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun denyAction(messageId: String) {
-        val msg = _ui.value.messages.find { it.id == messageId } ?: return
-        val action = msg.pendingAction ?: return
+        val msg = _ui.value.messages.find { it.id == messageId }
+        val action = msg?.pendingAction ?: _ui.value.pendingModalAction?.takeIf { it.first == messageId }?.second ?: return
         val addr = _ui.value.identity.addressAs.ifBlank { "Sir" }
         _ui.update { state ->
             state.copy(
                 coreState = CoreVisualState.IDLE,
+                pendingModalAction = if (state.pendingModalAction?.first == messageId) null else state.pendingModalAction,
                 statusBanner = "Action cancelled cleanly, $addr.",
                 messages = state.messages.map { if (it.id == messageId) it.copy(pendingAction = action.copy(status = ActionStatus.DENIED)) else it }
             )
@@ -541,7 +637,39 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
     fun stopMusic() { voiceEngine.stopAmbientTone(); _ui.update { it.copy(musicActive = false, musicPlaying = false) } }
     fun setMusicVolume(v: Float) { val vol = v.coerceIn(0.05f, 0.55f); voiceEngine.setAmbientVolume(vol); _ui.update { it.copy(musicVolume = vol) } }
 
+    fun toggleHandsFreeVoiceAssistant(onFallbackToSystemVoiceDialog: (() -> Unit)? = null) {
+        lastFallbackVoiceDialog = onFallbackToSystemVoiceDialog
+        if (IntentEngine.evaluatePermission(_ui.value.permissions, PermissionCapability.MICROPHONE) == PermissionPolicy.DENY) {
+            _ui.update { it.copy(statusBanner = "Microphone blocked in Permission Vault.") }
+            return
+        }
+        val turningOn = !_ui.value.handsFreeVoiceMode
+        if (!turningOn) {
+            voiceEngine.stopListening()
+            voiceEngine.stopSpeaking()
+            voiceEngine.playInteractionEarcon(EarconKind.STOPPED)
+            _ui.update {
+                it.copy(
+                    handsFreeVoiceMode = false,
+                    coreState = CoreVisualState.IDLE,
+                    liveTranscript = "",
+                    statusBanner = null
+                )
+            }
+            return
+        }
+        _ui.update {
+            it.copy(
+                handsFreeVoiceMode = true,
+                voiceReplyEnabled = true,
+                statusBanner = "Voice Assistant active — speak naturally."
+            )
+        }
+        startVoiceCaptureInternal(onFallbackToSystemVoiceDialog)
+    }
+
     fun toggleVoiceListening(onFallbackToSystemVoiceDialog: (() -> Unit)? = null) {
+        lastFallbackVoiceDialog = onFallbackToSystemVoiceDialog
         if (IntentEngine.evaluatePermission(_ui.value.permissions, PermissionCapability.MICROPHONE) == PermissionPolicy.DENY) {
             _ui.update { it.copy(statusBanner = "Microphone blocked in Permission Vault.") }; return
         }
@@ -555,6 +683,10 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
             _ui.update { it.copy(coreState = CoreVisualState.IDLE, liveTranscript = "") }
             return
         }
+        startVoiceCaptureInternal(onFallbackToSystemVoiceDialog)
+    }
+
+    private fun startVoiceCaptureInternal(onFallbackToSystemVoiceDialog: (() -> Unit)?) {
         voiceEngine.stopSpeaking()
         voiceEngine.playInteractionEarcon(EarconKind.LISTEN_START)
         _ui.update { it.copy(coreState = CoreVisualState.LISTENING, liveTranscript = "Listening...") }
@@ -567,6 +699,21 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
                 onFallbackToSystemVoiceDialog?.invoke()
             }
         )
+    }
+
+    fun toggleThemeMode() {
+        val next = if (_ui.value.themeMode == AppThemeMode.DARK) AppThemeMode.LIGHT else AppThemeMode.DARK
+        setThemeMode(next)
+    }
+
+    fun setThemeMode(mode: AppThemeMode) {
+        store.saveThemeMode(mode.name)
+        _ui.update {
+            it.copy(
+                themeMode = mode,
+                statusBanner = "Theme switched to ${mode.label}."
+            )
+        }
     }
 
     fun toggleVoiceReply() = _ui.update {
@@ -612,6 +759,12 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
 
     fun toggleInstallModel(modelId: String) =
         ShamiaStateDelegates.installOrRemoveModel(getApplication(), viewModelScope, _ui, store, modelId)
+
+    fun pauseModelDownload(modelId: String) =
+        ShamiaStateDelegates.pauseModelDownload(getApplication(), _ui, modelId)
+
+    fun preloadModelIntoRam(modelId: String) =
+        ShamiaStateDelegates.preloadModelIntoRam(getApplication(), viewModelScope, _ui, modelId)
 
     fun importLocalModelFile(modelId: String, uri: Uri) =
         ShamiaStateDelegates.importModelTaskFile(getApplication(), viewModelScope, _ui, store, modelId, uri)

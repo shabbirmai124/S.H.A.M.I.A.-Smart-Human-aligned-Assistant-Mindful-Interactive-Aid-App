@@ -22,6 +22,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.FolderOpen
@@ -29,6 +30,8 @@ import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material3.Button
@@ -51,6 +54,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.shamia.assistant.engine.ModelCatalog
+import com.shamia.assistant.model.AppThemeMode
 import com.shamia.assistant.model.VoiceGender
 import com.shamia.assistant.ui.ShamiaUiState
 import com.shamia.assistant.ui.theme.AmberWarn
@@ -72,9 +76,12 @@ fun ModelsHubTab(
     onSelectModel: (String) -> Unit,
     onNewChatWithModel: (String) -> Unit,
     onToggleInstallModel: (String) -> Unit,
+    onPauseModelDownload: (String) -> Unit,
+    onPreloadModel: (String) -> Unit,
     onImportLocalModel: (String, Uri) -> Unit,
     onToggleInstallVoice: (String) -> Unit,
     onSelectVoiceGender: (VoiceGender) -> Unit,
+    onSelectThemeMode: (AppThemeMode) -> Unit,
     onToggleInteractionSound: () -> Unit,
     onToggleResearch: () -> Unit,
     onToggleEnsemble: () -> Unit,
@@ -126,6 +133,57 @@ fun ModelsHubTab(
                         style = MaterialTheme.typography.bodySmall,
                         color = TextSecondary
                     )
+                    Text(
+                        text = "⚡ Turbo 8x Parallel Downloader · Auto Checkpoint Resume · Background RAM Preload",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = SapphireBright,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+        }
+
+        // 1b. App Appearance & Background Theme (Obsidian Dark / Google White)
+        item {
+            Surface(shape = RoundedCornerShape(14.dp), color = CardSlate, border = BorderStroke(1.dp, CardBorder)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(0.42f)) {
+                        Icon(Icons.Filled.Palette, contentDescription = null, tint = SapphireBright, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("App Theme", style = MaterialTheme.typography.bodyMedium, color = TextPrimary, fontWeight = FontWeight.Medium)
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = GraphiteSurface,
+                        border = BorderStroke(1.dp, CardBorder),
+                        modifier = Modifier.weight(0.58f)
+                    ) {
+                        Row(modifier = Modifier.fillMaxWidth()) {
+                            AppThemeMode.entries.forEach { mode ->
+                                val selected = state.themeMode == mode
+                                Surface(
+                                    onClick = { onSelectThemeMode(mode) },
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = if (selected) SapphirePulse else GraphiteSurface,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("theme_mode_${mode.name.lowercase()}")
+                                ) {
+                                    Text(
+                                        text = mode.label,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (selected) ObsidianVoid else TextSecondary,
+                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -399,27 +457,74 @@ fun ModelsHubTab(
                         }
                         if (spec.supportsOfflineInstall) {
                             val downloadInfo = state.modelDownloadProgress[spec.id]
+                            val partialPct = state.partialDownloadPercents[spec.id]
+                            val isLoadedInRam = state.loadedInRamModelId == spec.id
+                            val isLoadingInRam = state.loadingInRamModelId == spec.id
+
                             OutlinedButton(
                                 onClick = { if (downloadInfo == null) onToggleInstallModel(spec.id) },
-                                border = BorderStroke(1.dp, if (isInstalled) EmeraldOk else CardBorder),
+                                border = BorderStroke(1.dp, if (isInstalled) EmeraldOk else if (partialPct != null) SapphirePulse else CardBorder),
                                 modifier = Modifier.testTag("install_offline_${spec.id}")
                             ) {
                                 Icon(
                                     imageVector = if (isInstalled) Icons.Filled.DownloadDone else Icons.Filled.Download,
                                     contentDescription = null,
-                                    tint = if (isInstalled) EmeraldOk else TextPrimary,
+                                    tint = if (isInstalled) EmeraldOk else if (partialPct != null) SapphireBright else TextPrimary,
                                     modifier = Modifier.size(16.dp)
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text(
                                     text = when {
-                                        downloadInfo != null -> "Downloading ${downloadInfo.first}%"
+                                        downloadInfo != null -> "Turbo ${downloadInfo.first}%"
                                         isInstalled -> "Loaded Offline (${spec.sizeLabel.substringBefore(" ")})"
-                                        else -> "Download (${spec.sizeLabel})"
+                                        partialPct != null -> "Resume ($partialPct%)"
+                                        else -> "Turbo Download (${spec.sizeLabel})"
                                     },
-                                    color = if (isInstalled) EmeraldOk else TextPrimary
+                                    color = if (isInstalled) EmeraldOk else if (partialPct != null) SapphireBright else TextPrimary
                                 )
                             }
+
+                            if (downloadInfo != null) {
+                                OutlinedButton(
+                                    onClick = { onPauseModelDownload(spec.id) },
+                                    border = BorderStroke(1.dp, AmberWarn),
+                                    modifier = Modifier.testTag("pause_download_${spec.id}")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.Pause,
+                                        contentDescription = "Pause download",
+                                        tint = AmberWarn,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Pause", color = AmberWarn)
+                                }
+                            }
+
+                            if (isInstalled) {
+                                OutlinedButton(
+                                    onClick = { if (!isLoadedInRam && !isLoadingInRam) onPreloadModel(spec.id) },
+                                    border = BorderStroke(1.dp, if (isLoadedInRam) EmeraldOk else SapphirePulse.copy(alpha = 0.7f)),
+                                    modifier = Modifier.testTag("preload_ram_${spec.id}")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.Bolt,
+                                        contentDescription = "RAM preload status",
+                                        tint = if (isLoadedInRam) EmeraldOk else SapphireBright,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = when {
+                                            isLoadedInRam -> "Ready in RAM (${state.loadedBackendLabel.ifBlank { "Fast" }})"
+                                            isLoadingInRam -> "Loading RAM..."
+                                            else -> "Preload RAM"
+                                        },
+                                        color = if (isLoadedInRam) EmeraldOk else SapphireBright
+                                    )
+                                }
+                            }
+
                             if (!isInstalled && downloadInfo == null) {
                                 OutlinedButton(
                                     onClick = {

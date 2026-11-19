@@ -60,6 +60,9 @@ class RoutineSyllabusStore(context: Context) {
     fun loadShowAllModels(): Boolean = prefs.getBoolean("show_all_models", false)
     fun saveShowAllModels(showAll: Boolean) = prefs.edit().putBoolean("show_all_models", showAll).apply()
 
+    fun loadThemeMode(): String = prefs.getString("app_theme_mode", "DARK") ?: "DARK"
+    fun saveThemeMode(mode: String) = prefs.edit().putString("app_theme_mode", mode).apply()
+
     fun loadOllamaEndpoint(): String = prefs.getString("ollama_endpoint", "http://127.0.0.1:11434") ?: "http://127.0.0.1:11434"
     fun saveOllamaEndpoint(url: String) = prefs.edit().putString("ollama_endpoint", url).apply()
 
