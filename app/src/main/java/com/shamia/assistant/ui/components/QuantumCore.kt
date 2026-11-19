@@ -27,6 +27,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
@@ -45,7 +46,6 @@ import com.shamia.assistant.ui.theme.AmberWarn
 import com.shamia.assistant.ui.theme.EmeraldOk
 import com.shamia.assistant.ui.theme.SapphireBright
 import com.shamia.assistant.ui.theme.SapphirePulse
-import com.shamia.assistant.ui.theme.TextPrimary
 import com.shamia.assistant.ui.theme.TextSecondary
 import kotlin.math.PI
 import kotlin.math.cos
@@ -62,8 +62,8 @@ fun QuantumCore(
 ) {
     val accent = when (coreState) {
         CoreVisualState.AWAITING_PERMISSION -> AmberWarn
-        CoreVisualState.SPEAKING -> EmeraldOk
-        CoreVisualState.LISTENING -> SapphireBright
+        CoreVisualState.SPEAKING -> SapphireBright
+        CoreVisualState.LISTENING -> EmeraldOk
         else -> SapphirePulse
     }
 
@@ -76,41 +76,48 @@ fun QuantumCore(
     }
 
     val infiniteTransition = rememberInfiniteTransition(label = "quantum_core")
-    val outerAngle by infiniteTransition.animateFloat(
+    val outerOrbitAngle by infiniteTransition.animateFloat(
         initialValue = 0f,
         targetValue = 360f,
         animationSpec = infiniteRepeatable(
             animation = tween(
-                durationMillis = if (coreState == CoreVisualState.THINKING) 5000 else 16000,
+                durationMillis = when (coreState) {
+                    CoreVisualState.THINKING -> 4200
+                    CoreVisualState.LISTENING -> 5600
+                    else -> 14000
+                },
                 easing = LinearEasing
             )
         ),
-        label = "outer_angle"
+        label = "outer_orbit_angle"
     )
-    val innerAngle by infiniteTransition.animateFloat(
+    val midOrbitAngle by infiniteTransition.animateFloat(
         initialValue = 360f,
         targetValue = 0f,
         animationSpec = infiniteRepeatable(
             animation = tween(
-                durationMillis = if (coreState == CoreVisualState.LISTENING) 4500 else 11000,
+                durationMillis = when (coreState) {
+                    CoreVisualState.LISTENING, CoreVisualState.THINKING -> 3600
+                    else -> 9800
+                },
                 easing = LinearEasing
             )
         ),
-        label = "inner_angle"
+        label = "mid_orbit_angle"
     )
     val pulse by infiniteTransition.animateFloat(
-        initialValue = 0.88f,
-        targetValue = 1.12f,
+        initialValue = 0.92f,
+        targetValue = 1.08f,
         animationSpec = infiniteRepeatable(
             animation = tween(
-                durationMillis = if (coreState == CoreVisualState.LISTENING || coreState == CoreVisualState.SPEAKING) 850 else 2200
+                durationMillis = if (coreState == CoreVisualState.LISTENING || coreState == CoreVisualState.SPEAKING) 700 else 2100
             ),
             repeatMode = RepeatMode.Reverse
         ),
         label = "pulse"
     )
 
-    val orbSize = if (compact) 72.dp else 172.dp
+    val orbSize = if (compact) 74.dp else 168.dp
 
     Column(
         modifier = modifier,
@@ -138,10 +145,14 @@ fun QuantumCore(
                 val center = Offset(size.width / 2f, size.height / 2f)
                 val r = size.minDimension / 2f
 
-                // Outer radial halo
+                // 1. Soft atmospheric ambient cyan glow
                 drawCircle(
                     brush = Brush.radialGradient(
-                        colors = listOf(accent.copy(alpha = 0.24f * pulse), Color.Transparent),
+                        colors = listOf(
+                            accent.copy(alpha = 0.22f * pulse),
+                            Color(0xFF0A1420).copy(alpha = 0.35f),
+                            Color.Transparent
+                        ),
                         center = center,
                         radius = r
                     ),
@@ -149,21 +160,28 @@ fun QuantumCore(
                     center = center
                 )
 
-                // Machined precision bezel + 60 ticks
+                // 2. Dark obsidian outer instrument dial plate + thin precision rim
                 drawCircle(
-                    color = accent.copy(alpha = 0.30f),
-                    radius = r * 0.88f,
-                    center = center,
-                    style = Stroke(width = 1.5f)
+                    color = Color(0xFF0B131E),
+                    radius = r * 0.90f,
+                    center = center
                 )
+                drawCircle(
+                    color = accent.copy(alpha = 0.26f),
+                    radius = r * 0.90f,
+                    center = center,
+                    style = Stroke(width = if (compact) 1.2f else 1.8f)
+                )
+
+                // 3. 60 Precision chronometer ticks (12 major cyan ticks + 48 fine ticks)
                 for (i in 0 until 60) {
                     val deg = i * 6.0
                     val rad = deg * PI / 180.0
                     val isMajor = i % 5 == 0
-                    val rStart = r * (if (isMajor) 0.78f else 0.83f)
-                    val rEnd = r * 0.88f
+                    val rStart = r * (if (isMajor) 0.77f else 0.82f)
+                    val rEnd = r * 0.865f
                     drawLine(
-                        color = accent.copy(alpha = if (isMajor) 0.65f else 0.25f),
+                        color = accent.copy(alpha = if (isMajor) 0.75f else 0.22f),
                         start = Offset(
                             center.x + (rStart * cos(rad)).toFloat(),
                             center.y + (rStart * sin(rad)).toFloat()
@@ -172,66 +190,130 @@ fun QuantumCore(
                             center.x + (rEnd * cos(rad)).toFloat(),
                             center.y + (rEnd * sin(rad)).toFloat()
                         ),
-                        strokeWidth = if (isMajor) 2f else 1f
+                        strokeWidth = if (isMajor) (if (compact) 1.8f else 2.6f) else 1f,
+                        cap = StrokeCap.Round
                     )
                 }
 
-                // Rotating outer telemetry dashed ring + orbital nodes
-                rotate(degrees = outerAngle, pivot = center) {
+                // 4. Primary rotating orbital telemetry arcs + glowing satellite nodes
+                rotate(degrees = outerOrbitAngle, pivot = center) {
+                    val orbitR = r * 0.67f
+                    val arcTopLeft = Offset(center.x - orbitR, center.y - orbitR)
+                    val arcSize = Size(orbitR * 2f, orbitR * 2f)
+
+                    drawArc(
+                        color = accent.copy(alpha = 0.72f),
+                        startAngle = 215f,
+                        sweepAngle = 72f,
+                        useCenter = false,
+                        topLeft = arcTopLeft,
+                        size = arcSize,
+                        style = Stroke(width = if (compact) 1.5f else 2.4f, cap = StrokeCap.Round)
+                    )
+                    drawArc(
+                        color = accent.copy(alpha = 0.52f),
+                        startAngle = 315f,
+                        sweepAngle = 58f,
+                        useCenter = false,
+                        topLeft = arcTopLeft,
+                        size = arcSize,
+                        style = Stroke(width = if (compact) 1.4f else 2.2f, cap = StrokeCap.Round)
+                    )
+                    drawArc(
+                        color = accent.copy(alpha = 0.72f),
+                        startAngle = 38f,
+                        sweepAngle = 68f,
+                        useCenter = false,
+                        topLeft = arcTopLeft,
+                        size = arcSize,
+                        style = Stroke(width = if (compact) 1.5f else 2.4f, cap = StrokeCap.Round)
+                    )
+                    drawArc(
+                        color = accent.copy(alpha = 0.45f),
+                        startAngle = 135f,
+                        sweepAngle = 48f,
+                        useCenter = false,
+                        topLeft = arcTopLeft,
+                        size = arcSize,
+                        style = Stroke(width = if (compact) 1.3f else 2.0f, cap = StrokeCap.Round)
+                    )
+
+                    // Glowing orbital satellite dots along the orbit path
+                    val node1Rad = 262.0 * PI / 180.0
+                    val node2Rad = 82.0 * PI / 180.0
                     drawCircle(
-                        color = accent.copy(alpha = 0.60f),
-                        radius = r * 0.70f,
-                        center = center,
-                        style = Stroke(
-                            width = if (compact) 2f else 3f,
-                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(18f, 12f), 0f),
-                            cap = StrokeCap.Round
+                        color = Color(0xFFBAE6FD),
+                        radius = if (compact) 2.2f else 3.8f,
+                        center = Offset(
+                            center.x + (orbitR * cos(node1Rad)).toFloat(),
+                            center.y + (orbitR * sin(node1Rad)).toFloat()
                         )
                     )
                     drawCircle(
                         color = accent,
-                        radius = if (compact) 2.5f else 4.5f,
-                        center = Offset(center.x + r * 0.70f, center.y)
-                    )
-                    drawCircle(
-                        color = accent.copy(alpha = 0.75f),
-                        radius = if (compact) 2f else 3.5f,
-                        center = Offset(center.x - r * 0.70f, center.y)
+                        radius = if (compact) 2.0f else 3.4f,
+                        center = Offset(
+                            center.x + (orbitR * cos(node2Rad)).toFloat(),
+                            center.y + (orbitR * sin(node2Rad)).toFloat()
+                        )
                     )
                 }
 
-                // Counter-rotating inner aperture arc
-                rotate(degrees = innerAngle, pivot = center) {
-                    drawArc(
-                        color = accent.copy(alpha = 0.75f),
-                        startAngle = 0f,
-                        sweepAngle = 210f,
-                        useCenter = false,
-                        topLeft = Offset(center.x - r * 0.52f, center.y - r * 0.52f),
-                        size = androidx.compose.ui.geometry.Size(r * 1.04f, r * 1.04f),
-                        style = Stroke(width = if (compact) 2f else 3.2f, cap = StrokeCap.Round)
-                    )
-                }
-
-                // Acoustic wave rings during voice states
-                if (coreState == CoreVisualState.LISTENING || coreState == CoreVisualState.SPEAKING) {
+                // 5. Counter-rotating inner micro-dashed orbital ring
+                rotate(degrees = midOrbitAngle, pivot = center) {
                     drawCircle(
-                        color = accent.copy(alpha = 0.32f),
-                        radius = r * 0.60f * pulse,
+                        color = accent.copy(alpha = 0.36f),
+                        radius = r * 0.56f,
                         center = center,
-                        style = Stroke(width = 2f)
+                        style = Stroke(
+                            width = if (compact) 1.1f else 1.6f,
+                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 10f), 0f),
+                            cap = StrokeCap.Round
+                        )
                     )
                 }
 
-                // Luminous breathing core orb
+                // 6. Deep dark inner core cavity + crisp cyan aperture ring
+                drawCircle(
+                    color = Color(0xFF050A11),
+                    radius = r * 0.44f,
+                    center = center
+                )
+                drawCircle(
+                    color = accent.copy(alpha = 0.58f),
+                    radius = r * 0.44f,
+                    center = center,
+                    style = Stroke(width = if (compact) 1.4f else 2.2f)
+                )
+
+                // 7. 3D Luminous Quantum Core Sphere with off-center specular glow
+                val sphereR = r * 0.30f * pulse
                 drawCircle(
                     brush = Brush.radialGradient(
-                        colors = listOf(Color.White.copy(alpha = 0.92f), accent, accent.copy(alpha = 0.15f)),
-                        center = center,
-                        radius = r * 0.36f * pulse
+                        colors = listOf(
+                            Color.White,
+                            Color(0xFF7DD3FC),
+                            accent,
+                            Color(0xFF0369A1),
+                            Color(0xFF082F49)
+                        ),
+                        center = Offset(center.x - sphereR * 0.14f, center.y - sphereR * 0.16f),
+                        radius = sphereR * 1.15f
                     ),
-                    radius = r * 0.34f * pulse,
+                    radius = sphereR,
                     center = center
+                )
+
+                // 8. Top glass crescent specular reflection on the 3D sphere
+                val highlightR = sphereR * 0.80f
+                drawArc(
+                    color = Color.White.copy(alpha = 0.72f),
+                    startAngle = 212f,
+                    sweepAngle = 116f,
+                    useCenter = false,
+                    topLeft = Offset(center.x - highlightR, center.y - highlightR),
+                    size = Size(highlightR * 2f, highlightR * 2f),
+                    style = Stroke(width = if (compact) 1.2f else 2.0f, cap = StrokeCap.Round)
                 )
             }
         }
@@ -250,13 +332,6 @@ fun QuantumCore(
                 style = MaterialTheme.typography.labelSmall,
                 color = TextSecondary,
                 modifier = Modifier.padding(top = 2.dp)
-            )
-        } else {
-            Text(
-                text = if (coreState == CoreVisualState.LISTENING) "STOP" else "TAP MIC",
-                fontSize = 9.sp,
-                color = TextPrimary.copy(alpha = 0.8f),
-                fontWeight = FontWeight.Medium
             )
         }
     }

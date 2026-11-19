@@ -13,15 +13,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-val ObsidianVoid = Color(0xFF06080C)
-val GraphiteSurface = Color(0xFF0D1117)
-val CardSlate = Color(0xFF121822)
-val CardBorder = Color(0xFF1E293B)
-val SapphirePulse = Color(0xFF38BDF8)
-val SapphireBright = Color(0xFF7DD3FC)
-val SapphireContainer = Color(0xFF0B2A42)
-val TextPrimary = Color(0xFFE8EEF3)
-val TextSecondary = Color(0xFF94A3B8)
+val ObsidianVoid = Color(0xFF05080D)
+val GraphiteSurface = Color(0xFF090E15)
+val CardSlate = Color(0xFF0D131D)
+val CardBorder = Color(0xFF1A2636)
+val SapphirePulse = Color(0xFF29B6F6)
+val SapphireBright = Color(0xFF38BDF8)
+val SapphireContainer = Color(0xFF0B253A)
+val TextPrimary = Color(0xFFF1F5F9)
+val TextSecondary = Color(0xFF8B9BB0)
 val EmeraldOk = Color(0xFF34D399)
 val AmberWarn = Color(0xFFFBBF24)
 val RoseDeny = Color(0xFFFB7185)
@@ -77,23 +77,23 @@ private val ShamiaTypography = Typography(
     labelMedium = TextStyle(
         fontFamily = FontFamily.Monospace,
         fontWeight = FontWeight.Medium,
-        fontSize = 11.sp,
+        fontSize = 11.5.sp,
         lineHeight = 15.sp,
-        letterSpacing = 0.4.sp
+        letterSpacing = 0.3.sp
     ),
     labelSmall = TextStyle(
         fontFamily = FontFamily.Monospace,
         fontWeight = FontWeight.Medium,
         fontSize = 10.sp,
         lineHeight = 13.sp,
-        letterSpacing = 0.6.sp
+        letterSpacing = 0.5.sp
     )
 )
 
 private val ShamiaShapes = Shapes(
     small = RoundedCornerShape(10.dp),
-    medium = RoundedCornerShape(14.dp),
-    large = RoundedCornerShape(20.dp)
+    medium = RoundedCornerShape(16.dp),
+    large = RoundedCornerShape(22.dp)
 )
 
 @Composable

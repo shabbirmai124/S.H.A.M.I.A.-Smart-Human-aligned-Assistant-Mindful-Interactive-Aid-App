@@ -1,8 +1,11 @@
 package com.shamia.assistant
 
+import android.app.Activity
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.speech.RecognizerIntent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -17,6 +20,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.shamia.assistant.ui.ShamiaHudScreen
 import com.shamia.assistant.ui.ShamiaViewModel
 import com.shamia.assistant.ui.theme.ShamiaTheme
+import java.util.Locale
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -37,11 +41,38 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                val systemVoiceIntentLauncher = rememberLauncherForActivityResult(
+                    contract = ActivityResultContracts.StartActivityForResult()
+                ) { result ->
+                    if (result.resultCode == Activity.RESULT_OK) {
+                        val spoken = result.data
+                            ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                            ?.firstOrNull()
+                        if (!spoken.isNullOrBlank()) {
+                            vm.sendMessage(spoken)
+                        }
+                    }
+                }
+
+                val launchFallbackVoiceDialog: () -> Unit = {
+                    runCatching {
+                        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                            putExtra(
+                                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+                            )
+                            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.US.toLanguageTag())
+                            putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak to S.H.A.M.I.A.")
+                        }
+                        systemVoiceIntentLauncher.launch(intent)
+                    }
+                }
+
                 val micPermissionLauncher = rememberLauncherForActivityResult(
                     contract = ActivityResultContracts.RequestPermission()
                 ) { granted ->
                     if (granted) {
-                        vm.toggleVoiceListening()
+                        vm.toggleVoiceListening(onFallbackToSystemVoiceDialog = launchFallbackVoiceDialog)
                     }
                 }
 
@@ -53,7 +84,7 @@ class MainActivity : ComponentActivity() {
                             Manifest.permission.RECORD_AUDIO
                         ) == PackageManager.PERMISSION_GRANTED
                         if (granted) {
-                            vm.toggleVoiceListening()
+                            vm.toggleVoiceListening(onFallbackToSystemVoiceDialog = launchFallbackVoiceDialog)
                         } else {
                             micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                         }

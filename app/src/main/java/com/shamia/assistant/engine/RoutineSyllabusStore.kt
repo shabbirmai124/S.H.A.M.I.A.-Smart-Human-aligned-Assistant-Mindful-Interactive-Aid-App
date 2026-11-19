@@ -29,7 +29,7 @@ class RoutineSyllabusStore(context: Context) {
             .apply()
     }
 
-    fun loadSelectedModelId(): String = prefs.getString("selected_model_id", "gemma-4-free") ?: "gemma-4-free"
+    fun loadSelectedModelId(): String = prefs.getString("selected_model_id", "gemma-3-free") ?: "gemma-3-free"
     fun saveSelectedModelId(id: String) = prefs.edit().putString("selected_model_id", id).apply()
 
     fun loadEnsembleEnabled(): Boolean = prefs.getBoolean("ensemble_enabled", false)
@@ -37,22 +37,25 @@ class RoutineSyllabusStore(context: Context) {
 
     fun loadEnsembleIds(): List<String> {
         val raw = prefs.getString("ensemble_ids", null)
-        if (raw.isNullOrBlank()) return listOf("gemma-4-free", "qwen3-8b-chinese", "gpt-oss-20b-free")
+        if (raw.isNullOrBlank()) return listOf("gemma-3-free", "llama-32-free", "qwen25-1.5b-edge")
         return runCatching {
             val arr = JSONArray(raw)
             (0 until arr.length()).map { arr.getString(it) }
-        }.getOrDefault(listOf("gemma-4-free", "qwen3-8b-chinese", "gpt-oss-20b-free"))
+        }.getOrDefault(listOf("gemma-3-free", "llama-32-free", "qwen25-1.5b-edge"))
     }
 
     fun saveEnsembleIds(ids: List<String>) {
         prefs.edit().putString("ensemble_ids", JSONArray(ids).toString()).apply()
     }
 
-    fun loadUseResearch(): Boolean = prefs.getBoolean("use_research", true)
+    fun loadUseResearch(): Boolean = prefs.getBoolean("use_research", false)
     fun saveUseResearch(enabled: Boolean) = prefs.edit().putBoolean("use_research", enabled).apply()
 
     fun loadVoiceGender(): String = prefs.getString("voice_gender", "FEMALE") ?: "FEMALE"
     fun saveVoiceGender(gender: String) = prefs.edit().putString("voice_gender", gender).apply()
+
+    fun loadInteractionSoundEnabled(): Boolean = prefs.getBoolean("interaction_sound_enabled", true)
+    fun saveInteractionSoundEnabled(enabled: Boolean) = prefs.edit().putBoolean("interaction_sound_enabled", enabled).apply()
 
     fun loadShowAllModels(): Boolean = prefs.getBoolean("show_all_models", false)
     fun saveShowAllModels(showAll: Boolean) = prefs.edit().putBoolean("show_all_models", showAll).apply()

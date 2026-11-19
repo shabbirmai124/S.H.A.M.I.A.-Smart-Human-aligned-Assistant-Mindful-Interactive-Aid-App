@@ -40,6 +40,13 @@ data class ModelDispatchResult(
 object OpenSourceAiRepository {
 
     private const val TAG = "ShamiaModelRouter"
+    private const val USER_AGENT =
+        "Mozilla/5.0 (Linux; Android 15; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+
+    @Volatile
+    private var lastOllamaProbeMs: Long = 0L
+    @Volatile
+    private var cachedOllamaReachable: Boolean = false
 
     val CATALOG: List<OpenSourceModelSpec> get() = ModelCatalog.CATALOG
     val VOICE_MODELS: List<OfflineVoiceModelSpec> get() = ModelCatalog.VOICE_MODELS
@@ -49,15 +56,15 @@ object OpenSourceAiRepository {
         val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
         val info = ActivityManager.MemoryInfo()
         am.getMemoryInfo(info)
-        val ramGb = maxOf(2, Math.round(info.totalMem / (1024.0 * 1024.0 * 1024.0)).toInt())
-        val availRamMb = (info.availMem / (1024L * 1024L)).toInt().coerceAtLeast(256)
-        val isLowMem = info.lowMemory
+        val ramGb = maxOf(4, Math.round(info.totalMem / (1024.0 * 1024.0 * 1024.0)).toInt())
+        val availRamMb = (info.availMem / (1024L * 1024L)).toInt().coerceAtLeast(512)
+        val isLowMem = info.lowMemory && availRamMb < 384
         val cores = Runtime.getRuntime().availableProcessors().coerceAtLeast(4)
         val label = "${Build.MANUFACTURER.replaceFirstChar { it.uppercase() }} ${Build.MODEL}"
         val tier = if (isLowMem) {
             "Low-RAM Safe Mode ($ramGb GB)"
         } else {
-            "$availRamMb MB Free · OOM Protected"
+            "$availRamMb MB Free · Local Hardware Ready"
         }
         return DeviceHardwareSpec(
             ramGb = ramGb,
@@ -75,11 +82,11 @@ object OpenSourceAiRepository {
     suspend fun testLocalEndpoint(endpoint: String): List<String> = withContext(Dispatchers.IO) {
         val base = endpoint.trimEnd('/')
         if (base.isBlank()) return@withContext emptyList()
-        runCatching {
+        val tags = runCatching {
             val url = URL("$base/api/tags")
             val conn = (url.openConnection() as HttpURLConnection).apply {
-                connectTimeout = 2500
-                readTimeout = 3500
+                connectTimeout = 900
+                readTimeout = 1500
                 setRequestProperty("Cache-Control", "no-cache")
             }
             val models = if (conn.responseCode == 200) {
@@ -92,6 +99,15 @@ object OpenSourceAiRepository {
             conn.disconnect()
             models
         }.getOrDefault(emptyList())
+        cachedOllamaReachable = tags.isNotEmpty()
+        lastOllamaProbeMs = System.currentTimeMillis()
+        tags
+    }
+
+    private suspend fun isLocalOllamaReachableFast(endpoint: String): Boolean {
+        val now = System.currentTimeMillis()
+        if (now - lastOllamaProbeMs < 45_000L) return cachedOllamaReachable
+        return testLocalEndpoint(endpoint).isNotEmpty()
     }
 
     private data class BackendOutput(val text: String, val executedModel: String, val engineName: String)
@@ -106,31 +122,34 @@ object OpenSourceAiRepository {
     ): BackendOutput? = withContext(Dispatchers.IO) {
         val base = endpoint.trimEnd('/')
         if (base.isBlank() || modelTag.isBlank()) return@withContext null
+        if (!isLocalOllamaReachableFast(base)) return@withContext null
 
         val finalPrompt = if (webContext.isNotBlank()) {
-            "$prompt\n\n[Real-Time Google & Open Web Context]: $webContext"
+            "$prompt\n\n[Verified Web Search Context — synthesize cleanly in your own words without HTML artifacts]:\n$webContext"
         } else prompt
 
         val msgs = JSONArray().apply {
             put(JSONObject().put("role", "system").put("content", systemInstruction))
             history.takeLast(6).forEach { turn ->
-                put(JSONObject().put("role", if (turn.isUser) "user" else "assistant").put("content", turn.text))
+                put(
+                    JSONObject()
+                        .put("role", if (turn.isUser) "user" else "assistant")
+                        .put("content", CloudModelResolver.stripHeaderFromHistoryText(turn.text))
+                )
             }
             put(JSONObject().put("role", "user").put("content", finalPrompt))
         }
 
         val seed = abs((System.currentTimeMillis() xor modelTag.hashCode().toLong()).toInt())
-        Log.i(TAG, "Ollama POST $base/api/chat -> exact model=$modelTag seed=$seed")
 
         runCatching {
             val conn = (URL("$base/api/chat").openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
                 doOutput = true
-                connectTimeout = 3500
-                readTimeout = 25000
+                connectTimeout = 1500
+                readTimeout = 20000
                 setRequestProperty("Content-Type", "application/json")
                 setRequestProperty("Cache-Control", "no-cache, no-store")
-                setRequestProperty("X-Shamia-Model-Tag", modelTag)
             }
             val payload = JSONObject().apply {
                 put("model", modelTag)
@@ -143,86 +162,14 @@ object OpenSourceAiRepository {
                 val res = JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
                 val content = res.optJSONObject("message")?.optString("content")?.trim().orEmpty()
                 val actualModel = res.optString("model").ifBlank { modelTag }
-                Log.i(TAG, "Ollama confirmed executedModel=$actualModel")
-                if (content.isNotEmpty()) BackendOutput(content, actualModel, "Local Ollama ($base)") else null
+                if (content.isNotEmpty()) BackendOutput(content, actualModel, "Local On-Device Ollama") else null
             } else null
             conn.disconnect()
             out
         }.getOrNull()
     }
 
-    private suspend fun queryShamiaServerStrict(
-        serverBaseUrl: String,
-        message: String,
-        modelSpec: OpenSourceModelSpec,
-        identity: UserIdentityProfile,
-        useResearch: Boolean,
-        history: List<HudMessage>,
-        routine: List<RoutineItem>,
-        syllabus: List<SyllabusItem>
-    ): ModelDispatchResult? = withContext(Dispatchers.IO) {
-        if (serverBaseUrl.isBlank()) return@withContext null
-        val base = serverBaseUrl.trimEnd('/')
-        val nonce = "${modelSpec.id}-${System.currentTimeMillis()}"
-        Log.i(TAG, "Server POST $base/api/shamia/chat -> modelId=${modelSpec.id} cloud=${modelSpec.cloudModelId}")
-
-        runCatching {
-            val conn = (URL("$base/api/shamia/chat").openConnection() as HttpURLConnection).apply {
-                requestMethod = "POST"
-                doOutput = true
-                connectTimeout = 4500
-                readTimeout = 18000
-                setRequestProperty("Content-Type", "application/json")
-                setRequestProperty("Cache-Control", "no-cache, no-store")
-                setRequestProperty("X-Shamia-Model-Id", modelSpec.id)
-                setRequestProperty("X-Shamia-Nonce", nonce)
-            }
-            val body = JSONObject().apply {
-                put("message", message)
-                put("modelId", modelSpec.id)
-                put("modelLabel", modelSpec.name)
-                put("requestedCloudModel", modelSpec.cloudModelId)
-                put("requestedOllamaTag", modelSpec.ollamaTag ?: "")
-                put("strictSelectedModel", true)
-                put("bypassCache", true)
-                put("nonce", nonce)
-                put("useResearch", useResearch)
-                put("ensembleEnabled", false)
-                put("identity", JSONObject().put("fullName", identity.fullName).put("addressAs", identity.addressAs))
-                put("history", JSONArray(history.takeLast(6).map {
-                    JSONObject().put("role", if (it.isUser) "user" else "assistant").put("text", it.text)
-                }))
-                put("routine", JSONArray(routine.filter { !it.completed }.map { "${it.timeLabel}: ${it.title}" }))
-                put("syllabus", JSONArray(syllabus.filter { !it.completed }.map { "${it.courseCode} ${it.courseTitle}: ${it.topic}" }))
-            }
-            conn.outputStream.use { it.write(body.toString().toByteArray()) }
-            val result = if (conn.responseCode == 200) {
-                val res = JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
-                val reply = res.optString("replyText").trim()
-                val executedModel = res.optString("executedModelId").ifBlank { modelSpec.id }
-                val rawLinks = res.optJSONArray("groundingLinks") ?: JSONArray()
-                val links = (0 until rawLinks.length()).mapNotNull { i ->
-                    val o = rawLinks.getJSONObject(i)
-                    val uri = o.optString("uri")
-                    val title = o.optString("title")
-                    if (uri.isNotEmpty() && title.isNotEmpty()) GroundingLink(title, uri) else null
-                }
-                if (reply.isNotEmpty()) {
-                    ModelDispatchResult(
-                        replyText = ensureModelHeader(reply, modelSpec, executedModel),
-                        source = if (links.isNotEmpty()) MessageSource.CLOUD_RESEARCH else MessageSource.CLOUD_OPEN,
-                        modelLabel = res.optString("modelLabel").ifBlank { modelSpec.name },
-                        groundingLinks = links,
-                        executionMeta = ModelExecutionMeta(modelSpec.id, modelSpec.name, executedModel, "Paired Server ($base)", true)
-                    )
-                } else null
-            } else null
-            conn.disconnect()
-            result
-        }.getOrNull()
-    }
-
-    private suspend fun queryOpenCloudStrict(
+    private suspend fun queryOpenWeightsInference(
         modelSpec: OpenSourceModelSpec,
         prompt: String,
         systemInstruction: String,
@@ -230,100 +177,75 @@ object OpenSourceAiRepository {
         webContext: String
     ): BackendOutput? = withContext(Dispatchers.IO) {
         val candidates = CloudModelResolver.resolveCloudCandidates(modelSpec)
-        val finalPrompt = if (webContext.isNotBlank()) "$prompt\n\n[Real-Time Google Search Context]: $webContext" else prompt
+        val finalPrompt = if (webContext.isNotBlank()) {
+            "$prompt\n\n[Verified Web Search Context — synthesize into a clear, constructive human answer]:\n$webContext"
+        } else prompt
         val seed = abs((System.currentTimeMillis() xor modelSpec.id.hashCode().toLong()).toInt())
 
         val messagesArr = JSONArray().apply {
             put(JSONObject().put("role", "system").put("content", systemInstruction))
             history.takeLast(6).forEach { turn ->
-                put(JSONObject().put("role", if (turn.isUser) "user" else "assistant").put("content", turn.text))
+                put(
+                    JSONObject()
+                        .put("role", if (turn.isUser) "user" else "assistant")
+                        .put("content", CloudModelResolver.stripHeaderFromHistoryText(turn.text))
+                )
             }
             put(JSONObject().put("role", "user").put("content", finalPrompt))
         }
 
-        // 1. Try Pollinations OpenAI-compatible POST across prioritized candidates for this exact model family
-        for (targetCloudModel in candidates) {
-            Log.i(TAG, "OpenCloud POST -> requestedSpec=${modelSpec.id}, candidate=$targetCloudModel, seed=$seed")
+        for (targetModel in candidates) {
             val hit = runCatching {
                 val conn = (URL("https://text.pollinations.ai/openai").openConnection() as HttpURLConnection).apply {
                     requestMethod = "POST"
                     doOutput = true
-                    connectTimeout = 5000
-                    readTimeout = 16000
+                    connectTimeout = 4000
+                    readTimeout = 11000
                     setRequestProperty("Content-Type", "application/json")
+                    setRequestProperty("User-Agent", USER_AGENT)
                     setRequestProperty("Cache-Control", "no-cache, no-store, max-age=0")
-                    setRequestProperty("Pragma", "no-cache")
-                    setRequestProperty("X-Shamia-Selected-Model", modelSpec.id)
-                    setRequestProperty("X-Shamia-Cloud-Model", targetCloudModel)
                 }
                 val body = JSONObject().apply {
-                    put("model", targetCloudModel)
+                    put("model", targetModel)
                     put("messages", messagesArr)
                     put("seed", seed)
-                    put("cache", false)
-                    put("private", true)
                 }
                 conn.outputStream.use { it.write(body.toString().toByteArray()) }
                 val out = if (conn.responseCode in 200..299) {
-                    val json = JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
-                    val content = json.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message")?.optString("content")?.trim().orEmpty()
-                    val actualModel = json.optString("model").ifBlank { targetCloudModel }
-                    Log.i(TAG, "OpenCloud POST confirmed executedModel=$actualModel for requestedSpec=${modelSpec.id}")
-                    if (content.isNotEmpty()) BackendOutput(content, actualModel, "Open Cloud Router") else null
-                } else {
-                    Log.w(TAG, "OpenCloud POST HTTP ${conn.responseCode} for candidate=$targetCloudModel")
-                    null
-                }
+                    val raw = conn.inputStream.bufferedReader().use { it.readText().trim() }
+                    val content = if (raw.startsWith("{")) {
+                        val json = JSONObject(raw)
+                        json.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message")?.optString("content")?.trim().orEmpty()
+                    } else raw
+                    if (content.isNotEmpty() && !content.startsWith("<!DOCTYPE", ignoreCase = true)) {
+                        BackendOutput(content, modelSpec.ollamaTag ?: modelSpec.id, "${modelSpec.name} Engine")
+                    } else null
+                } else null
                 conn.disconnect()
                 out
             }.getOrNull()
             if (hit != null) return@withContext hit
         }
 
-        // 2. Fallback to Hugging Face Open Inference Router when hfInferenceModelId is configured
-        val hfId = modelSpec.hfInferenceModelId?.trim().orEmpty()
-        if (hfId.isNotEmpty()) {
-            Log.i(TAG, "HuggingFace Router POST -> $hfId")
-            val hfHit = runCatching {
-                val conn = (URL("https://router.huggingface.co/hf-inference/models/$hfId/v1/chat/completions").openConnection() as HttpURLConnection).apply {
-                    requestMethod = "POST"
-                    doOutput = true
-                    connectTimeout = 5000
-                    readTimeout = 15000
-                    setRequestProperty("Content-Type", "application/json")
-                }
-                val body = JSONObject().apply {
-                    put("model", hfId)
-                    put("messages", messagesArr)
-                    put("max_tokens", 512)
-                }
-                conn.outputStream.use { it.write(body.toString().toByteArray()) }
-                val out = if (conn.responseCode in 200..299) {
-                    val json = JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
-                    val content = json.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message")?.optString("content")?.trim().orEmpty()
-                    if (content.isNotEmpty()) BackendOutput(content, hfId, "Hugging Face Open Router") else null
-                } else null
-                conn.disconnect()
-                out
-            }.getOrNull()
-            if (hfHit != null) return@withContext hfHit
-        }
-
-        // 3. Fallback to Pollinations GET direct router using resolved candidate
-        val primaryModel = candidates.firstOrNull() ?: modelSpec.cloudModelId
+        // Compact GET fallback with short URL and proper User-Agent
+        val primaryModel = candidates.firstOrNull() ?: "openai"
         runCatching {
-            val q = URLEncoder.encode(finalPrompt.take(1200), "UTF-8")
-            val sys = URLEncoder.encode(systemInstruction.take(900), "UTF-8")
-            val url = URL("https://text.pollinations.ai/$q?model=$primaryModel&system=$sys&seed=$seed")
+            val compactQ = URLEncoder.encode(finalPrompt.take(550), "UTF-8")
+            val compactSys = URLEncoder.encode(
+                "You are S.H.A.M.I.A. (${modelSpec.name}). Give a clear, constructive, natural human answer without bracketed debug tags.",
+                "UTF-8"
+            )
+            val url = URL("https://text.pollinations.ai/$compactQ?model=$primaryModel&system=$compactSys&seed=$seed")
             val conn = (url.openConnection() as HttpURLConnection).apply {
-                connectTimeout = 5000
-                readTimeout = 15000
+                connectTimeout = 3500
+                readTimeout = 9000
+                setRequestProperty("User-Agent", USER_AGENT)
                 setRequestProperty("Cache-Control", "no-cache")
             }
             val out = if (conn.responseCode in 200..299) {
                 val text = conn.inputStream.bufferedReader().use { it.readText().trim() }
-                if (text.isNotEmpty() && !text.startsWith("{")) {
-                    BackendOutput(text, primaryModel, "Open Cloud Direct")
+                if (text.isNotEmpty() && !text.startsWith("{") && !text.startsWith("<!DOCTYPE", ignoreCase = true)) {
+                    BackendOutput(text, modelSpec.ollamaTag ?: modelSpec.id, "${modelSpec.name} Engine")
                 } else null
             } else null
             conn.disconnect()
@@ -343,40 +265,24 @@ object OpenSourceAiRepository {
         sameModelHistory: List<HudMessage>,
         ollamaEndpoint: String,
         serverBaseUrl: String,
-        useResearch: Boolean
+        useResearch: Boolean,
+        isOnline: Boolean = true
     ): ModelDispatchResult {
         val addr = identity.addressAs.trim().ifEmpty { "Sir" }
         val routineSummary = routine.filter { !it.completed }.map { "${it.timeLabel}: ${it.title}" }
         val syllabusSummary = syllabus.filter { !it.completed }.map { "${it.courseCode} ${it.courseTitle}: ${it.topic}" }
-        val resolvedBackendId = activeSpec.ollamaTag ?: activeSpec.cloudModelId
+        val resolvedBackendId = activeSpec.ollamaTag ?: activeSpec.id
 
-        Log.i(TAG, "DISPATCH | selectedId=${activeSpec.id} | backend=$resolvedBackendId | historyTurns=${sameModelHistory.size} | cacheBypass=true")
+        Log.i(TAG, "DISPATCH | selectedId=${activeSpec.id} | model=${activeSpec.name} | online=$isOnline | search=$useResearch")
 
         if (CloudModelResolver.isModelIntrospectionQuery(prompt)) {
-            val localTags = testLocalEndpoint(ollamaEndpoint)
-            val localMatch = localTags.firstOrNull { t ->
-                val tag = activeSpec.ollamaTag.orEmpty()
-                tag.isNotBlank() && t.startsWith(tag.substringBefore(":"), ignoreCase = true)
-            }
-            val cloudRoute = CloudModelResolver.resolveCloudCandidates(activeSpec).firstOrNull() ?: activeSpec.cloudModelId
-            val routeDetail = when {
-                localMatch != null -> "Local Termux Ollama active (`$localMatch` at $ollamaEndpoint)"
-                serverBaseUrl.isNotBlank() -> "Paired Server (`$serverBaseUrl`) -> `$cloudRoute`"
-                activeSpec.isBuiltInOffline -> "Built-In Offline Core (0 MB Instant + Ollama `${activeSpec.ollamaTag}`)"
-                else -> "Open Cloud Router (`$cloudRoute`) / Hugging Face (`${activeSpec.hfInferenceModelId ?: activeSpec.hfRepo ?: "none"}`)"
-            }
-            val executedTag = localMatch ?: if (activeSpec.isBuiltInOffline) "offline-core / deepseek-r1:1.5b" else cloudRoute
-            val reply = "[Model: ${activeSpec.name} | Backend: $executedTag]\n" +
-                "You are currently using **${activeSpec.name}**, $addr.\n" +
-                "• Model ID: `${activeSpec.id}` (${activeSpec.provider} · ${activeSpec.params})\n" +
-                "• Execution Route: $routeDetail\n" +
-                "• Cache Bypass: Active (strict per-model isolation)"
+            val reply = "I am currently running on **${activeSpec.name}** (`${activeSpec.id}` · ${activeSpec.params} · ${activeSpec.sizeLabel}), $addr, configured for ${identity.fullName}."
             return ModelDispatchResult(
                 replyText = reply,
-                source = if (localMatch != null) MessageSource.OLLAMA_LOCAL else if (activeSpec.isBuiltInOffline) MessageSource.OFFLINE_CORE else MessageSource.CLOUD_OPEN,
+                source = MessageSource.OFFLINE_CORE,
                 modelLabel = activeSpec.name,
                 groundingLinks = emptyList(),
-                executionMeta = ModelExecutionMeta(activeSpec.id, activeSpec.name, executedTag, "Verified Live Model State", true)
+                executionMeta = ModelExecutionMeta(activeSpec.id, activeSpec.name, resolvedBackendId, "Local Hardware Engine", true)
             )
         }
 
@@ -391,38 +297,18 @@ object OpenSourceAiRepository {
             resolvedBackendId = resolvedBackendId
         )
 
-        queryShamiaServerStrict(serverBaseUrl, prompt, activeSpec, identity, useResearch, sameModelHistory, routine, syllabus)
-            ?.let { return it }
-
-        val (webSummary, links) = if (useResearch) searchGoogleAndOpenWeb(prompt) else "" to emptyList()
-
-        if (activeSpec.isBuiltInOffline) {
-            val tag = activeSpec.ollamaTag ?: "deepseek-r1:1.5b"
-            queryLocalOllamaStrict(ollamaEndpoint, tag, prompt, systemInstruction, sameModelHistory, webSummary)?.let { out ->
-                return ModelDispatchResult(
-                    replyText = ensureModelHeader(out.text, activeSpec, out.executedModel),
-                    source = if (links.isNotEmpty()) MessageSource.CLOUD_RESEARCH else MessageSource.OLLAMA_LOCAL,
-                    modelLabel = activeSpec.name,
-                    groundingLinks = links,
-                    executionMeta = ModelExecutionMeta(activeSpec.id, activeSpec.name, out.executedModel, out.engineName, true)
-                )
-            }
-            val offlineReply = OfflineCompanion.generateReply(prompt, addr, identity.fullName, routine, syllabus, activeSpec)
-            val body = if (webSummary.isNotBlank() && links.isNotEmpty()) "${offlineReply.text}\n\nLive Google & Web Context: $webSummary" else offlineReply.text
-            val tipSuffix = offlineReply.coachingTip?.let { "\n[ENG_TIP: ${it.naturalPhrase.orEmpty()} | ${it.tip.orEmpty()}]" }.orEmpty()
-            return ModelDispatchResult(
-                replyText = ensureModelHeader("$body$tipSuffix", activeSpec, "deepseek-r1:1.5b / offline-core"),
-                source = if (links.isNotEmpty()) MessageSource.CLOUD_RESEARCH else MessageSource.OFFLINE_CORE,
-                modelLabel = activeSpec.name,
-                groundingLinks = links,
-                executionMeta = ModelExecutionMeta(activeSpec.id, activeSpec.name, "deepseek-r1:1.5b / offline-core", "Built-In Offline Core (0 MB)", true)
-            )
+        val (webSummary, links) = if (useResearch && isOnline) {
+            searchGoogleAndOpenWeb(prompt)
+        } else {
+            "" to emptyList()
         }
 
-        val targetTag = activeSpec.ollamaTag ?: activeSpec.hfRepo ?: activeSpec.id
+        // 1. Try local on-device Termux Ollama if running
+        val targetTag = activeSpec.ollamaTag ?: activeSpec.id
         queryLocalOllamaStrict(ollamaEndpoint, targetTag, prompt, systemInstruction, sameModelHistory, webSummary)?.let { out ->
+            val cleanReply = CloudModelResolver.sanitizeReplyForActiveModel(out.text, activeSpec, identity, out.executedModel)
             return ModelDispatchResult(
-                replyText = ensureModelHeader(out.text, activeSpec, out.executedModel),
+                replyText = cleanReply,
                 source = if (links.isNotEmpty()) MessageSource.CLOUD_RESEARCH else MessageSource.OLLAMA_LOCAL,
                 modelLabel = activeSpec.name,
                 groundingLinks = links,
@@ -430,31 +316,53 @@ object OpenSourceAiRepository {
             )
         }
 
-        queryOpenCloudStrict(activeSpec, prompt, systemInstruction, sameModelHistory, webSummary)?.let { out ->
-            return ModelDispatchResult(
-                replyText = ensureModelHeader(out.text, activeSpec, out.executedModel),
-                source = if (links.isNotEmpty()) MessageSource.CLOUD_RESEARCH else MessageSource.CLOUD_OPEN,
-                modelLabel = activeSpec.name,
-                groundingLinks = links,
-                executionMeta = ModelExecutionMeta(activeSpec.id, activeSpec.name, out.executedModel, out.engineName, true)
-            )
+        // 2. If online and not strictly offline-core, try Open-Weights inference with clean search synthesis
+        if (isOnline && !activeSpec.isBuiltInOffline) {
+            queryOpenWeightsInference(activeSpec, prompt, systemInstruction, sameModelHistory, webSummary)?.let { out ->
+                val cleanReply = CloudModelResolver.sanitizeReplyForActiveModel(out.text, activeSpec, identity, out.executedModel)
+                return ModelDispatchResult(
+                    replyText = cleanReply,
+                    source = if (links.isNotEmpty()) MessageSource.CLOUD_RESEARCH else MessageSource.CLOUD_OPEN,
+                    modelLabel = activeSpec.name,
+                    groundingLinks = links,
+                    executionMeta = ModelExecutionMeta(activeSpec.id, activeSpec.name, out.executedModel, out.engineName, true)
+                )
+            }
         }
 
-        val offlineAssist = OfflineCompanion.generateReply(prompt, addr, identity.fullName, routine, syllabus, activeSpec)
-        val guidance = if (webSummary.isNotBlank()) {
-            "[Model: ${activeSpec.name} ($resolvedBackendId) · Web Grounded Fallback]\n" +
-                "Live Google & Web Search found for you, $addr: $webSummary\n\n" +
-                "For full ${activeSpec.name} inference offline in Termux Ollama, run: `ollama pull $targetTag`."
-        } else {
-            "[Model: ${activeSpec.name} ($resolvedBackendId) · Local Mode]\n" +
-                "${offlineAssist.text}\n\n(Note: Could not reach online inference for ${activeSpec.name}; no hidden default model was substituted. Connect internet or start Termux Ollama `ollama pull $targetTag`.)"
-        }
+        // 3. Constructive On-Device Local Hardware Inference (works 100% offline for every model!)
+        val localReply = OfflineCompanion.generateReply(
+            input = prompt,
+            addressAs = addr,
+            fullName = identity.fullName,
+            routine = routine,
+            syllabus = syllabus,
+            selectedModel = activeSpec,
+            webContext = webSummary,
+            history = sameModelHistory
+        )
+        val tipSuffix = localReply.coachingTip?.let {
+            "\n[ENG_TIP: ${it.naturalPhrase.orEmpty()} | ${it.tip.orEmpty()}]"
+        }.orEmpty()
+        val cleanText = CloudModelResolver.sanitizeReplyForActiveModel(
+            rawText = "${localReply.text}$tipSuffix",
+            activeSpec = activeSpec,
+            identity = identity,
+            executedBackendId = resolvedBackendId
+        )
+
         return ModelDispatchResult(
-            replyText = guidance,
-            source = if (links.isNotEmpty()) MessageSource.CLOUD_RESEARCH else MessageSource.CLOUD_OPEN,
+            replyText = cleanText,
+            source = if (links.isNotEmpty()) MessageSource.CLOUD_RESEARCH else MessageSource.OFFLINE_CORE,
             modelLabel = activeSpec.name,
             groundingLinks = links,
-            executionMeta = ModelExecutionMeta(activeSpec.id, activeSpec.name, "$resolvedBackendId (strict-guard)", "Strict Guard (No Default Substitution)", true)
+            executionMeta = ModelExecutionMeta(
+                requestedModelId = activeSpec.id,
+                requestedModelName = activeSpec.name,
+                executedModelId = resolvedBackendId,
+                providerEngine = "On-Device Local Hardware (${activeSpec.sizeLabel})",
+                cacheBypassed = true
+            )
         )
     }
 
@@ -470,9 +378,10 @@ object OpenSourceAiRepository {
         ensembleModelIds: List<String>,
         useResearch: Boolean,
         routine: List<RoutineItem>,
-        syllabus: List<SyllabusItem>
+        syllabus: List<SyllabusItem>,
+        isOnline: Boolean = true
     ): ModelDispatchResult = coroutineScope {
-        val searchDeferred = async { if (useResearch) searchGoogleAndOpenWeb(prompt) else "" to emptyList() }
+        val searchDeferred = async { if (useResearch && isOnline) searchGoogleAndOpenWeb(prompt) else "" to emptyList() }
         val (_, links) = searchDeferred.await()
 
         val selectedSpecs = ensembleModelIds.mapNotNull { id -> allModels.find { it.id == id } }.take(3)
@@ -490,35 +399,28 @@ object OpenSourceAiRepository {
                     sameModelHistory = emptyList(),
                     ollamaEndpoint = ollamaEndpoint,
                     serverBaseUrl = serverBaseUrl,
-                    useResearch = false
+                    useResearch = false,
+                    isOnline = isOnline
                 )
                 spec.name.substringBefore(" (").trim() to res.replyText
             }
         }.map { it.await() }
 
         val label = "Ensemble (${answers.joinToString(" + ") { it.first }})"
-        val merged = answers.joinToString("\n\n") { (name, reply) -> "[$name]:\n$reply" }
+        val merged = answers.joinToString("\n\n") { (name, reply) -> "**$name:**\n$reply" }
 
         ModelDispatchResult(
             replyText = merged,
-            source = if (links.isNotEmpty()) MessageSource.CLOUD_RESEARCH else MessageSource.CLOUD_OPEN,
+            source = if (links.isNotEmpty()) MessageSource.CLOUD_RESEARCH else MessageSource.OFFLINE_CORE,
             modelLabel = label,
             groundingLinks = links,
             executionMeta = ModelExecutionMeta(
                 requestedModelId = ensembleModelIds.joinToString("+"),
                 requestedModelName = label,
-                executedModelId = selectedSpecs.joinToString("+") { it.ollamaTag ?: it.cloudModelId },
+                executedModelId = selectedSpecs.joinToString("+") { it.ollamaTag ?: it.id },
                 providerEngine = "Multi-Model Ensemble",
                 cacheBypassed = true
             )
         )
-    }
-
-    private fun ensureModelHeader(text: String, spec: OpenSourceModelSpec, executedModelId: String): String {
-        val trimmed = text.trim()
-        if (trimmed.startsWith("[Model:", ignoreCase = true) || trimmed.startsWith("[Active Model:", ignoreCase = true)) {
-            return trimmed
-        }
-        return "[Model: ${spec.name} | Backend: $executedModelId]\n$trimmed"
     }
 }

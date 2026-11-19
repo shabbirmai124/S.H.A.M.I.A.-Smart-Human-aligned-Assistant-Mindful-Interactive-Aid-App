@@ -119,7 +119,7 @@ fun ShamiaHudScreen(
             painter = painterResource(id = R.drawable.img_obsidian_backdrop),
             contentDescription = null,
             contentScale = ContentScale.Crop,
-            alpha = 0.14f,
+            alpha = 0.12f,
             modifier = Modifier.fillMaxSize()
         )
 
@@ -133,13 +133,6 @@ fun ShamiaHudScreen(
                 topBar = {
                     TopCockpitBar(
                         state = state,
-                        modelDropdownExpanded = modelDropdownExpanded,
-                        onToggleModelDropdown = { modelDropdownExpanded = !modelDropdownExpanded },
-                        onDismissModelDropdown = { modelDropdownExpanded = false },
-                        onSelectModel = { id ->
-                            vm.selectModel(id)
-                            modelDropdownExpanded = false
-                        },
                         onNewChat = { showNewChatDialog = true },
                         onToggleVoiceReply = vm::toggleVoiceReply,
                         onOpenIdentity = { showIdentityDialog = true }
@@ -196,7 +189,14 @@ fun ShamiaHudScreen(
                         ) {
                             HudConversationPane(
                                 state = state,
-                                compactCore = false,
+                                compactCore = true,
+                                modelDropdownExpanded = modelDropdownExpanded,
+                                onToggleModelDropdown = { modelDropdownExpanded = !modelDropdownExpanded },
+                                onDismissModelDropdown = { modelDropdownExpanded = false },
+                                onSelectModel = { id ->
+                                    vm.selectModel(id)
+                                    modelDropdownExpanded = false
+                                },
                                 inputDraft = inputDraft,
                                 onInputChange = { inputDraft = it },
                                 onSend = {
@@ -205,6 +205,8 @@ fun ShamiaHudScreen(
                                         inputDraft = ""
                                     }
                                 },
+                                onStopGeneration = vm::stopGeneration,
+                                onToggleWebSearch = vm::toggleWebResearch,
                                 onQuickPrompt = vm::sendMessage,
                                 onTapCore = onRequestMicPermissionAndListen,
                                 onAuthorizeOnce = vm::approveActionOnce,
@@ -260,6 +262,13 @@ fun ShamiaHudScreen(
                             WorkspaceTab.HUD -> HudConversationPane(
                                 state = state,
                                 compactCore = true,
+                                modelDropdownExpanded = modelDropdownExpanded,
+                                onToggleModelDropdown = { modelDropdownExpanded = !modelDropdownExpanded },
+                                onDismissModelDropdown = { modelDropdownExpanded = false },
+                                onSelectModel = { id ->
+                                    vm.selectModel(id)
+                                    modelDropdownExpanded = false
+                                },
                                 inputDraft = inputDraft,
                                 onInputChange = { inputDraft = it },
                                 onSend = {
@@ -268,6 +277,8 @@ fun ShamiaHudScreen(
                                         inputDraft = ""
                                     }
                                 },
+                                onStopGeneration = vm::stopGeneration,
+                                onToggleWebSearch = vm::toggleWebResearch,
                                 onQuickPrompt = vm::sendMessage,
                                 onTapCore = onRequestMicPermissionAndListen,
                                 onAuthorizeOnce = vm::approveActionOnce,
@@ -311,6 +322,7 @@ private fun WorkspaceTabContent(
             onToggleInstallModel = vm::toggleInstallModel,
             onToggleInstallVoice = vm::toggleInstallVoiceModel,
             onSelectVoiceGender = vm::setVoiceGender,
+            onToggleInteractionSound = vm::toggleInteractionSound,
             onToggleResearch = vm::toggleWebResearch,
             onToggleEnsemble = vm::toggleEnsembleEnabled,
             onToggleEnsembleMember = vm::toggleEnsembleMember,

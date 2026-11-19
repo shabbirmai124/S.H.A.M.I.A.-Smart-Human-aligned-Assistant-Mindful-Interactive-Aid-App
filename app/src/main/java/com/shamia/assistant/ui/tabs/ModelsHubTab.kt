@@ -21,6 +21,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DownloadDone
+import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Memory
@@ -65,6 +66,7 @@ fun ModelsHubTab(
     onToggleInstallModel: (String) -> Unit,
     onToggleInstallVoice: (String) -> Unit,
     onSelectVoiceGender: (VoiceGender) -> Unit,
+    onToggleInteractionSound: () -> Unit,
     onToggleResearch: () -> Unit,
     onToggleEnsemble: () -> Unit,
     onToggleEnsembleMember: (String) -> Unit,
@@ -80,7 +82,7 @@ fun ModelsHubTab(
         contentPadding = PaddingValues(14.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        // 1. Device Safety & Hardware · OOM Protected
+        // 1. Device Safety & Hardware · Local Hardware Compatibility
         item {
             Surface(shape = RoundedCornerShape(14.dp), color = CardSlate, border = BorderStroke(1.dp, CardBorder)) {
                 Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -92,16 +94,16 @@ fun ModelsHubTab(
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Filled.PhoneAndroid, contentDescription = null, tint = SapphireBright, modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("Device Safety & Hardware", style = MaterialTheme.typography.titleSmall, color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                            Text("Local Phone Hardware Profiler", style = MaterialTheme.typography.titleSmall, color = TextPrimary, fontWeight = FontWeight.SemiBold)
                         }
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Filled.VerifiedUser, contentDescription = "OOM Protected", tint = EmeraldOk, modifier = Modifier.size(14.dp))
                             Spacer(modifier = Modifier.width(4.dp))
-                            Text("OOM Protected", style = MaterialTheme.typography.labelSmall, color = EmeraldOk, fontWeight = FontWeight.SemiBold)
+                            Text("100% Local Ready", style = MaterialTheme.typography.labelSmall, color = EmeraldOk, fontWeight = FontWeight.SemiBold)
                         }
                     }
                     Text(
-                        text = "RAM: ${state.hardware.ramGb} GB · Avail: ${state.hardware.availRamMb} MB · Cores: ${state.hardware.cpuCores} · ${state.hardware.recommendedTier}",
+                        text = "Device: ${state.hardware.deviceLabel} · RAM: ${state.hardware.ramGb} GB (${state.hardware.availRamMb} MB Free) · CPU Cores: ${state.hardware.cpuCores}",
                         style = MaterialTheme.typography.bodySmall,
                         color = TextSecondary
                     )
@@ -154,7 +156,42 @@ fun ModelsHubTab(
             }
         }
 
-        // 3. Real-Time Google Search Pill Card
+        // 3. Voice Interaction Sound Effects Toggle
+        item {
+            Surface(shape = RoundedCornerShape(14.dp), color = CardSlate, border = BorderStroke(1.dp, CardBorder)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                        Icon(Icons.Filled.GraphicEq, contentDescription = null, tint = SapphireBright, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Column {
+                            Text("Voice Interaction Sound FX", style = MaterialTheme.typography.bodyMedium, color = TextPrimary)
+                            Text("Audible chimes on mic listen, send, reply & stop", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+                        }
+                    }
+                    Surface(
+                        onClick = onToggleInteractionSound,
+                        shape = RoundedCornerShape(8.dp),
+                        color = if (state.interactionSoundEnabled) SapphireContainer else GraphiteSurface,
+                        border = BorderStroke(1.dp, if (state.interactionSoundEnabled) SapphirePulse else CardBorder),
+                        modifier = Modifier.testTag("toggle_interaction_sound_pill")
+                    ) {
+                        Text(
+                            text = if (state.interactionSoundEnabled) "Enabled" else "Off",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (state.interactionSoundEnabled) SapphireBright else TextSecondary,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                        )
+                    }
+                }
+            }
+        }
+
+        // 4. Optional Live Web Search Pill Card
         item {
             Surface(shape = RoundedCornerShape(14.dp), color = CardSlate, border = BorderStroke(1.dp, CardBorder)) {
                 Row(
@@ -165,7 +202,10 @@ fun ModelsHubTab(
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
                         Icon(Icons.Filled.Language, contentDescription = null, tint = SapphireBright, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Real-Time Google Search", style = MaterialTheme.typography.bodyMedium, color = TextPrimary)
+                        Column {
+                            Text("Optional Web Search Grounding", style = MaterialTheme.typography.bodyMedium, color = TextPrimary)
+                            Text("Toggle anytime here or via the 🌐 button in chat", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+                        }
                     }
                     Surface(
                         onClick = onToggleResearch,
@@ -175,7 +215,7 @@ fun ModelsHubTab(
                         modifier = Modifier.testTag("toggle_research_pill")
                     ) {
                         Text(
-                            text = if (state.useResearch) "Enabled" else "Off",
+                            text = if (state.useResearch) "Enabled" else "Local Only",
                             style = MaterialTheme.typography.labelMedium,
                             color = if (state.useResearch) SapphireBright else TextSecondary,
                             fontWeight = FontWeight.SemiBold,
@@ -186,7 +226,7 @@ fun ModelsHubTab(
             }
         }
 
-        // 4. Multi-Model Ensemble (3) Pill Card
+        // 5. Multi-Model Ensemble (3) Pill Card
         item {
             Surface(shape = RoundedCornerShape(14.dp), color = CardSlate, border = BorderStroke(1.dp, CardBorder)) {
                 Row(
@@ -222,21 +262,30 @@ fun ModelsHubTab(
         item {
             Surface(shape = RoundedCornerShape(14.dp), color = GraphiteSurface, border = BorderStroke(1.dp, SapphirePulse.copy(alpha = 0.6f))) {
                 Column(modifier = Modifier.padding(12.dp)) {
-                    Text("ACTIVE STRICT MODEL: ${activeSpec.name}", style = MaterialTheme.typography.labelMedium, color = SapphireBright, fontWeight = FontWeight.Bold)
-                    Text("Backend ID: ${activeSpec.ollamaTag ?: activeSpec.cloudModelId} · Cache Bypassed", style = MaterialTheme.typography.labelSmall, color = EmeraldOk)
-                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "ACTIVE LOCAL MODEL: ${activeSpec.name} (${activeSpec.sizeLabel})",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = SapphireBright,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "${activeSpec.params} · Min RAM: ${activeSpec.minRamGb} GB · Official Source: ${activeSpec.hfRepo ?: activeSpec.ollamaTag}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = EmeraldOk
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
                     Button(
                         onClick = onStartNewChatWithActiveModel,
                         colors = ButtonDefaults.buttonColors(containerColor = SapphirePulse, contentColor = ObsidianVoid),
                         modifier = Modifier.fillMaxWidth().testTag("models_start_new_chat_button")
                     ) {
-                        Text("New Chat with Active Model")
+                        Text("New Chat with ${activeSpec.name.substringBefore(" ·").substringBefore(" (")}", fontWeight = FontWeight.SemiBold)
                     }
                 }
             }
         }
 
-        // 5. Compatible Models (N) + Show All Header
+        // 6. Compatible Models (N) + Show All Header
         item {
             Row(
                 modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
@@ -244,18 +293,18 @@ fun ModelsHubTab(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = if (state.showAllModels) "All Models (${state.allModels.size})" else "Compatible Models (${state.compatibleModels.size})",
+                    text = if (state.showAllModels) "All Open-Weight Models (${state.allModels.size})" else "Hardware-Compatible Models (${state.compatibleModels.size})",
                     style = MaterialTheme.typography.titleSmall,
                     color = TextPrimary,
                     fontWeight = FontWeight.SemiBold
                 )
                 TextButton(onClick = onToggleShowAllModels, modifier = Modifier.testTag("toggle_show_all_models")) {
-                    Text(if (state.showAllModels) "Compatible Only" else "Show All", color = SapphireBright)
+                    Text(if (state.showAllModels) "Compatible Only" else "Show All (${state.allModels.size})", color = SapphireBright)
                 }
             }
         }
 
-        // 6. Model Cards with Safe for Device, Use/Active, Install Offline, + Mix
+        // 7. Model Cards with explicit GB/MB download size, Safe for Device, Use/Active, Download Offline
         items(state.displayedModels, key = { it.id }) { spec ->
             val isActive = spec.id == state.selectedModelId
             val isInstalled = state.installedModelIds.contains(spec.id)
@@ -282,15 +331,25 @@ fun ModelsHubTab(
                             }
                             Text(
                                 text = buildString {
+                                    append(spec.sizeLabel)
+                                    append(" · ")
                                     append(spec.params)
                                     append(" · ")
-                                    append(if (safe) "Safe for Device" else "Needs ${spec.minRamGb} GB RAM")
+                                    append(if (safe) "Compatible (${spec.minRamGb} GB+ RAM)" else "Needs ${spec.minRamGb} GB RAM")
                                     if (isRecommended) append(" · Recommended")
                                 },
                                 style = MaterialTheme.typography.labelSmall,
                                 color = if (safe) EmeraldOk else AmberWarn,
                                 modifier = Modifier.padding(top = 3.dp)
                             )
+                            if (spec.summary.isNotBlank()) {
+                                Text(
+                                    text = spec.summary,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = TextSecondary,
+                                    modifier = Modifier.padding(top = 4.dp)
+                                )
+                            }
                         }
                         Spacer(modifier = Modifier.width(8.dp))
                         Button(
@@ -335,9 +394,9 @@ fun ModelsHubTab(
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text(
                                     text = when {
-                                        downloadInfo != null -> "Installing ${downloadInfo.first}%"
-                                        isInstalled -> "Installed Offline"
-                                        else -> "Install Offline"
+                                        downloadInfo != null -> "Downloading ${downloadInfo.first}%"
+                                        isInstalled -> "Loaded Offline (${spec.sizeLabel.substringBefore(" ")})"
+                                        else -> "Download (${spec.sizeLabel})"
                                     },
                                     color = if (isInstalled) EmeraldOk else TextPrimary
                                 )
@@ -368,7 +427,7 @@ fun ModelsHubTab(
             }
         }
 
-        // 7. Offline Voice Models (STT & TTS)
+        // 8. Offline Voice Models (STT & TTS) with Download Sizes
         item {
             Text(
                 text = "Offline Voice Models (STT & TTS)",
@@ -401,7 +460,7 @@ fun ModelsHubTab(
                                 text = when {
                                     dl != null -> "${dl.first}%"
                                     cached -> "Installed"
-                                    else -> "Install"
+                                    else -> "Download (${voice.sizeLabel.substringBefore(" ")})"
                                 },
                                 color = if (cached) EmeraldOk else TextPrimary
                             )
@@ -421,12 +480,12 @@ fun ModelsHubTab(
             }
         }
 
-        // 8. Add Custom HF Model
+        // 9. Add Custom HF Model
         item {
             AddCustomHfModelCard(onAddCustomModel = onAddCustomModel)
         }
 
-        // 9. Local Ollama Endpoint
+        // 10. Local Ollama Endpoint
         item {
             LocalOllamaEndpointCard(
                 ollamaEndpoint = state.ollamaEndpoint,

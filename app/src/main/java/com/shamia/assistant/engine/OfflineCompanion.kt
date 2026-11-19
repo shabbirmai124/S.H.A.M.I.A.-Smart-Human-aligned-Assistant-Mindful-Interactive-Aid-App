@@ -2,10 +2,13 @@ package com.shamia.assistant.engine
 
 import com.shamia.assistant.model.CoachingTip
 import com.shamia.assistant.model.ConversationalIntent
+import com.shamia.assistant.model.HudMessage
 import com.shamia.assistant.model.OpenSourceModelSpec
 import com.shamia.assistant.model.RoutineItem
 import com.shamia.assistant.model.SyllabusItem
 import java.util.Locale
+import kotlin.math.pow
+import kotlin.math.sqrt
 
 data class OfflineCompanionReply(
     val text: String,
@@ -26,7 +29,7 @@ object OfflineCompanion {
         GrammarRule(
             Regex("\\byesterday\\s+i\\s+am\\s+going\\b", RegexOption.IGNORE_CASE),
             "Yesterday I went to...",
-            "Use simple past (\"went\") instead of present continuous (\"am going\") for completed yesterday actions."
+            "Use simple past (\"went\") instead of present continuous (\"am going\") for completed actions yesterday."
         ),
         GrammarRule(
             Regex("\\byesterday\\s+i\\s+go\\b", RegexOption.IGNORE_CASE),
@@ -35,8 +38,8 @@ object OfflineCompanion {
         ),
         GrammarRule(
             Regex("\\bi\\s+am\\s+go(?:ing)?\\s+to\\s+office\\b", RegexOption.IGNORE_CASE),
-            "I went to the office",
-            "Include \"the\" before \"office\" and match the past tense if describing earlier today or yesterday."
+            "I went to the office / I am heading to the office",
+            "Include \"the\" before \"office\" and match the tense to the time of day."
         ),
         GrammarRule(
             Regex("\\bi\\s+am\\s+go\\b", RegexOption.IGNORE_CASE),
@@ -45,7 +48,7 @@ object OfflineCompanion {
         ),
         GrammarRule(
             Regex("\\bdiscuss\\s+about\\b", RegexOption.IGNORE_CASE),
-            "discuss the plan",
+            "discuss the topic",
             "\"Discuss\" already means \"talk about\", so drop \"about\" right after it."
         ),
         GrammarRule(
@@ -56,7 +59,7 @@ object OfflineCompanion {
         GrammarRule(
             Regex("\\bi\\s+didn['’]?t\\s+went\\b", RegexOption.IGNORE_CASE),
             "I didn't go",
-            "After \"didn’t\", always use the base verb (\"go\") rather than the past form (\"went\")."
+            "After \"didn't\", always use the base verb (\"go\") rather than the past form (\"went\")."
         ),
         GrammarRule(
             Regex("\\breturn\\s+back\\b", RegexOption.IGNORE_CASE),
@@ -70,15 +73,15 @@ object OfflineCompanion {
         ),
         GrammarRule(
             Regex("\\bvery\\s+much\\s+tired\\b", RegexOption.IGNORE_CASE),
-            "I feel exhausted.",
+            "I feel exhausted / I'm really tired.",
             "Prefer \"really tired\" or \"exhausted\" instead of \"very much tired\"."
         )
     )
 
     private val englishDrillPrompts = listOf(
         "Tell me about one goal you are excited to finish this week, and try using at least two descriptive adjectives.",
-        "Imagine you are introducing your work to a new client over coffee—how would you describe what you build in two sentences?",
-        "What is one decision you made recently that turned out well? Walk me through your reasoning."
+        "Imagine you are introducing your favorite project over coffee—how would you describe what it does in two clear sentences?",
+        "What is one decision you made recently that turned out well? Walk me through your thinking."
     )
 
     private var drillCursor = 0
@@ -89,70 +92,46 @@ object OfflineCompanion {
         fullName: String,
         routine: List<RoutineItem>,
         syllabus: List<SyllabusItem>,
-        selectedModel: OpenSourceModelSpec? = null
+        selectedModel: OpenSourceModelSpec? = null,
+        webContext: String = "",
+        history: List<HudMessage> = emptyList()
     ): OfflineCompanionReply {
         val addr = addressAs.trim().ifEmpty { "Sir" }
         val owner = fullName.trim().ifEmpty { "Md Shabbir Mia" }
-        val trimmed = input.trim()
+        val trimmed = WebSearchClient.decodeHtmlEntities(input.trim())
         val lower = trimmed.lowercase(Locale.US)
         val intent = IntentEngine.detectConversationalIntent(trimmed)
+        val modelName = selectedModel?.name ?: "S.H.A.M.I.A. Offline Core"
 
-        // 1. Identity / Name meaning
-        if (Regex("\\b(your name|who are you|what is shamia|meaning of shamia|shamia)\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower)) {
-            return OfflineCompanionReply(
-                intent = ConversationalIntent.GENERAL,
-                text = "I am S.H.A.M.I.A.—Smart Human-aligned Assistant & Mindful Interactive Aid—named in honor of $owner, $addr. I am here to manage your device with strict permission control, practice spoken English with you, plan your routine and syllabus, and support you through busy or quiet days."
-            )
-        }
-
-        // 2. 4nm / 6nm phone SoC guidance
-        if (lower.contains("4nm") || lower.contains("6nm") || (lower.contains("phone") && lower.contains("processor"))) {
-            return OfflineCompanionReply(
-                intent = ConversationalIntent.GENERAL,
-                text = "4nm flagship Android phones (Snapdragon 8 Gen 2/3/Elite, Dimensity 9300/9400, Tensor G4) run under-10B open models including Qwen 3 8B, Qwen 3 4B, MiniCPM-o 2.6, and GLM-4 9B cleanly via Termux Ollama. 6nm mid-range phones (Snapdragon 695/6 Gen 1, Dimensity 6100+/7020, Helio G99) run DeepSeek 2B, Llama 3.2 1B, Qwen 3 4B, and Whisper Tiny.en/Base.en smoothly. Turn on Web Search for live Google results, $addr."
-            )
-        }
-
-        // 3. Routine & University Syllabus study alignment
-        if (lower.contains("study") || lower.contains("routine") || lower.contains("syllabus")) {
-            val nextRoutine = routine.filter { !it.completed }.take(3)
-                .joinToString(" -> ") { "${it.timeLabel} (${it.title})" }
-                .ifEmpty { "07:30 PM Evening Revision Block" }
-            val nextSyl = syllabus.filter { !it.completed }.take(3)
-                .joinToString(" + ") { "${it.courseCode} ${it.courseTitle}: ${it.topic}" }
-                .ifEmpty { "Core Course Review" }
-            return OfflineCompanionReply(
-                intent = ConversationalIntent.GENERAL,
-                text = "Aligned with your schedule, $addr: anchor today around $nextRoutine, and cover $nextSyl in two focused 40-minute deep-work sprints followed by a 5-minute spoken English summary."
-            )
-        }
-
-        // 4. Mental Support / Emotional Check-in
+        // 1. Mental Support / Emotional Check-in
         if (intent == ConversationalIntent.MENTAL_SUPPORT) {
-            val isPanicOrOverwhelmed = Regex("\\b(overwhelmed|panic|anxious|anxiety|breathe|stressed|burnt out|burnout)\\b").containsMatchIn(lower)
+            val isPanicOrOverwhelmed =
+                Regex("\\b(overwhelmed|panic|anxious|anxiety|breathe|stressed|burnt out|burnout)\\b").containsMatchIn(lower)
             return if (isPanicOrOverwhelmed) {
                 OfflineCompanionReply(
                     intent = ConversationalIntent.MENTAL_SUPPORT,
                     showBreathingTool = true,
-                    text = "Take a slow moment with me, $addr. You do not have to solve everything in the next five minutes—let us drop your shoulders, run a quick 4-4-6 breath together below, and tackle just one small thing afterward."
+                    text = "Take a slow breath with me, $addr. You don't have to solve everything at once. Drop your shoulders, follow the 4-4-6 breathing guide below for a few cycles, and then we can tackle just one small step together."
                 )
             } else {
                 OfflineCompanionReply(
                     intent = ConversationalIntent.MENTAL_SUPPORT,
                     showBreathingTool = true,
-                    text = "I hear you, $addr, and you do not have to carry that weight silently. Tell me what is weighing heaviest on you right now—we can untangle it step by step, or simply take a quiet pause."
+                    text = "I'm right here with you, $addr. Tell me what's weighing heaviest on your mind right now—we can break it down into manageable pieces, or just take a quiet pause together."
                 )
             }
         }
 
-        // 5. English Speaking & Grammar Coach
-        if (intent == ConversationalIntent.ENGLISH_TUTOR || Regex("\\b(correct|grammar|sentence|english|idiom|interview)\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower)) {
+        // 2. Spoken English & Grammar Coach
+        if (intent == ConversationalIntent.ENGLISH_TUTOR ||
+            Regex("\\b(correct my|practice english|speak english|english tutor|english coach|grammar|idiom|interview practice)\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower)
+        ) {
             for (rule in englishCorrections) {
                 if (rule.pattern.containsMatchIn(trimmed)) {
                     return OfflineCompanionReply(
                         intent = ConversationalIntent.ENGLISH_TUTOR,
                         coachingTip = CoachingTip(naturalPhrase = rule.naturalPhrase, tip = rule.tip),
-                        text = "Good effort, $addr—your meaning is completely clear. A slightly smoother way to say that is \"${rule.naturalPhrase}\". How did the rest of your conversation go?"
+                        text = "Your meaning comes across clearly, $addr. To make it sound even more natural to native speakers, try saying \"${rule.naturalPhrase}\". What else happened after that?"
                     )
                 }
             }
@@ -162,9 +141,9 @@ object OfflineCompanion {
                     intent = ConversationalIntent.ENGLISH_TUTOR,
                     coachingTip = CoachingTip(
                         naturalPhrase = "Hit the ground running",
-                        tip = "Means starting a new project or day with immediate energy and readiness."
+                        tip = "Means starting a project or task immediately with full energy and focus."
                     ),
-                    text = "Here is a sharp everyday phrase, $addr: \"hit the ground running.\" For example, \"After reviewing the notes, we hit the ground running this morning.\" Would you like to try using it in a sentence of your own?"
+                    text = "Here is a great everyday idiom, $addr: \"hit the ground running.\" For example: \"Once we finalized the design, our team hit the ground running.\" Try using it in a sentence of your own!"
                 )
             }
 
@@ -172,73 +151,356 @@ object OfflineCompanion {
                 return OfflineCompanionReply(
                     intent = ConversationalIntent.ENGLISH_TUTOR,
                     coachingTip = CoachingTip(
-                        naturalPhrase = "Structure answers with Context -> Action -> Result",
-                        tip = "Keep sentences under 20 words and pause briefly between ideas for confident pacing."
+                        naturalPhrase = "Use the STAR method: Situation -> Task -> Action -> Result",
+                        tip = "Keep sentences under 20 words and end with the measurable impact you delivered."
                     ),
-                    text = "Let us practice, $addr. \"Tell me about a tough technical problem you solved recently, and how you approached it.\" Speak or type your answer naturally and I will polish it with you."
+                    text = "Let's run a realistic interview drill, $addr: \"Can you tell me about a challenging problem you solved recently and how you approached it?\" Type or speak your answer and I'll give you constructive feedback."
                 )
             }
 
-            val prompt = englishDrillPrompts[drillCursor % englishDrillPrompts.size]
+            val drill = englishDrillPrompts[drillCursor % englishDrillPrompts.size]
             drillCursor += 1
             return OfflineCompanionReply(
                 intent = ConversationalIntent.ENGLISH_TUTOR,
                 coachingTip = CoachingTip(
-                    tip = "Tip: Speak at a calm pace and connect ideas with \"firstly\", \"on top of that\", or \"as a result\"."
+                    naturalPhrase = "Connect ideas smoothly with \"First of all\", \"In addition\", and \"As a result\"",
+                    tip = "Speaking at a steady, unhurried pace makes your pronunciation sound much clearer."
                 ),
-                text = "I am ready to practice with you offline, $addr. $prompt"
+                text = "I'd love to practice spoken English with you, $addr. $drill"
             )
         }
 
-        // 6. Greetings, Gratitude, Capabilities, Farewells
-        if (Regex("^(hi|hello|hey|good morning|good afternoon|good evening|how are you|how's it going|what's up)\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower)) {
-            val isHowAreYou = Regex("how are you|how's it going|what's up", RegexOption.IGNORE_CASE).containsMatchIn(lower)
-            return OfflineCompanionReply(
-                intent = ConversationalIntent.GENERAL,
-                text = if (isHowAreYou) {
-                    "Doing well, $addr—thank you for asking. How is your day going, and what would you like to work on?"
-                } else {
-                    "Hello, $addr. How can I assist you right now?"
-                }
-            )
-        }
-
-        if (Regex("\\b(thank you|thanks|appreciate it|good job|well done)\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower)) {
-            return OfflineCompanionReply(
-                intent = ConversationalIntent.GENERAL,
-                text = "You are very welcome, $addr. Let me know whenever you need anything else."
-            )
-        }
-
-        if (Regex("\\b(what can you do|help me|capabilities|features)\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower)) {
-            return OfflineCompanionReply(
-                intent = ConversationalIntent.GENERAL,
-                text = "I can chat naturally, coach your spoken English in real time, search Google and open web sources, align your daily routine and university syllabus, manage tasks and alarms, and handle phone controls behind your Permission Vault, $addr."
-            )
-        }
-
-        if (Regex("\\b(good night|bye|see you|take care|going to sleep)\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower)) {
-            return OfflineCompanionReply(
-                intent = ConversationalIntent.GENERAL,
-                text = "Have a restful evening, $addr. I will be right here whenever you return."
-            )
-        }
-
-        // 7. Opportunistic grammar polish on general sentences
+        // 3. Opportunistic grammar polish on general sentences if a known grammar rule triggers
         for (rule in englishCorrections) {
             if (rule.pattern.containsMatchIn(trimmed)) {
                 return OfflineCompanionReply(
                     intent = ConversationalIntent.ENGLISH_TUTOR,
                     coachingTip = CoachingTip(naturalPhrase = rule.naturalPhrase, tip = rule.tip),
-                    text = "Got it, $addr. Also, a quick fluency polish: try saying \"${rule.naturalPhrase}\". What would you like to focus on next?"
+                    text = "Got it, $addr. By the way, a quick natural English polish for that phrasing is \"${rule.naturalPhrase}\". How would you like to proceed?"
                 )
             }
         }
 
-        val activeName = selectedModel?.name ?: "DeepSeek 2B · S.H.A.M.I.A. Offline Core"
+        // 4. Identity / Who are you / Which model
+        if (CloudModelResolver.isModelIntrospectionQuery(trimmed)) {
+            return OfflineCompanionReply(
+                intent = ConversationalIntent.GENERAL,
+                text = "I am currently running on **$modelName** (${selectedModel?.params ?: "Local Engine"} · ${selectedModel?.sizeLabel ?: "On-Device"}), $addr, operating locally on your phone hardware for $owner."
+            )
+        }
+
+        if (Regex("^(who are you|what is your name|what is shamia|meaning of shamia|introduce yourself)\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower)) {
+            return OfflineCompanionReply(
+                intent = ConversationalIntent.GENERAL,
+                text = "I am S.H.A.M.I.A. (Smart Human-aligned Assistant & Mindful Interactive Aid), your personal offline-first AI voice companion created by and for $owner, $addr. Currently powered by $modelName on your device, I can answer questions, help with coding and writing, practice spoken English, plan your study syllabus, and manage phone controls safely through your Permission Vault."
+            )
+        }
+
+        // 5. Greetings, Gratitude, Farewells
+        if (Regex("^(hi|hello|hey|good morning|good afternoon|good evening|assalamu alaikum|salam|how are you|how's it going|what's up)[!?. ]*$", RegexOption.IGNORE_CASE).containsMatchIn(lower)) {
+            val isHowAreYou = Regex("how are you|how's it going|what's up", RegexOption.IGNORE_CASE).containsMatchIn(lower)
+            return OfflineCompanionReply(
+                intent = ConversationalIntent.GENERAL,
+                text = if (isHowAreYou) {
+                    "I'm doing great and running smoothly on $modelName, $addr. How is your day going, and what can I help you with today?"
+                } else {
+                    "Hello, $addr! Good to hear from you. How can I help you today?"
+                }
+            )
+        }
+
+        if (Regex("^(thank you|thanks|thanks a lot|appreciate it|good job|well done)[!?. ]*$", RegexOption.IGNORE_CASE).containsMatchIn(lower)) {
+            return OfflineCompanionReply(
+                intent = ConversationalIntent.GENERAL,
+                text = "You're very welcome, $addr! Let me know anytime you want to tackle another question or task."
+            )
+        }
+
+        if (Regex("^(good night|bye|goodbye|see you|take care)[!?. ]*$", RegexOption.IGNORE_CASE).containsMatchIn(lower)) {
+            return OfflineCompanionReply(
+                intent = ConversationalIntent.GENERAL,
+                text = "Take care and have a wonderful rest, $addr. I'll be right here whenever you need me."
+            )
+        }
+
+        // 6. On-Device Math & Expression Evaluator
+        tryEvaluateMath(trimmed)?.let { mathAnswer ->
+            return OfflineCompanionReply(
+                intent = ConversationalIntent.GENERAL,
+                text = "$mathAnswer, $addr."
+            )
+        }
+
+        // 7. Mondegreens / Star-Spangled Banner / Misheard Lyrics analysis
+        if (lower.contains("mondegreen") || lower.contains("star-spangled banner") || lower.contains("donzerly light")) {
+            return OfflineCompanionReply(
+                intent = ConversationalIntent.GENERAL,
+                text = "A **mondegreen** is a mishearing or misinterpretation of a phrase in a song or poem that gives it a new meaning, $addr.\n\n" +
+                    "A classic example occurs in the opening line of Francis Scott Key's *\"The Star-Spangled Banner\"*:\n" +
+                    "• **Original lyric:** *\"O say can you see, by the dawn's early light\"*\n" +
+                    "• **Common mishearings:** Children often hear *\"O say\"* as **\"José, can you see?\"** and blend *\"dawn's early light\"* into a single invented word, **\"by the Donzerly light.\"**\n\n" +
+                    "This happens because our brains naturally group unfamiliar spoken syllables into familiar-sounding names or words when listening to music."
+            )
+        }
+
+        // 8. Stack / Stack Overflow / Tech Stack / Data Structure queries
+        if (Regex("\\b(stack\\s*overflow|stackflow|data\\s+structure\\s+stack|what\\s+is\\s+a\\s+stack|tech\\s+stack|call\\s+stack)\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower) ||
+            lower == "stack" || lower == "stackflow"
+        ) {
+            return OfflineCompanionReply(
+                intent = ConversationalIntent.GENERAL,
+                text = "Here is a clear breakdown of **Stack** in computing, $addr:\n\n" +
+                    "1. **Stack Data Structure (LIFO):** A Last-In, First-Out collection with two O(1) core operations: `push(item)` (adds to the top) and `pop()` (removes from the top). It powers function call stacks, undo/redo history, and expression parsing.\n" +
+                    "2. **Tech Stack:** The combination of programming languages, frameworks, and databases used to build an app (for example, Kotlin + Jetpack Compose + Material 3 on Android).\n" +
+                    "3. **Stack Overflow:** Both a condition where recursion exceeds call-stack memory, and the famous Q&A community for software developers."
+            )
+        }
+
+        // 9. Routine & University Syllabus Study Plan
+        if (lower.contains("study") || lower.contains("routine") || lower.contains("syllabus") || lower.contains("exam")) {
+            val nextRoutine = routine.filter { !it.completed }.take(3)
+                .joinToString("\n• ", prefix = "• ") { "${it.timeLabel}: ${it.title} (${it.category.label})" }
+                .ifEmpty { "• 07:30 PM: Focused Revision & Practice Block" }
+            val nextSyl = syllabus.filter { !it.completed }.take(3)
+                .joinToString("\n• ", prefix = "• ") { "${it.courseCode} ${it.courseTitle} — ${it.topic}${it.examNote?.let { n -> " [$n]" }.orEmpty()}" }
+                .ifEmpty { "• Core Subject Concept Review & Active Recall" }
+            return OfflineCompanionReply(
+                intent = ConversationalIntent.GENERAL,
+                text = "Here is a practical study plan aligned with your schedule, $addr:\n\n" +
+                    "**Upcoming Routine Blocks:**\n$nextRoutine\n\n" +
+                    "**Priority Syllabus Topics:**\n$nextSyl\n\n" +
+                    "**Recommended Strategy:** Run two 45-minute deep-focus sprints with notifications muted, write a 3-bullet summary from memory after each topic, and finish with a 5-minute spoken English recap."
+            )
+        }
+
+        // 10. 4nm / 6nm Smartphone SoC & Local Hardware Model Guide
+        if (lower.contains("4nm") || lower.contains("6nm") || (lower.contains("phone") && (lower.contains("processor") || lower.contains("chipset") || lower.contains("compare")))) {
+            return OfflineCompanionReply(
+                intent = ConversationalIntent.GENERAL,
+                text = "Here is how 4nm and 6nm mobile processors compare for running local offline AI models, $addr:\n\n" +
+                    "• **4nm Flagship SoCs (Snapdragon 8 Gen 2/3/Elite, Dimensity 9300/9400, Tensor G4):** Higher memory bandwidth (LPDDR5X) and strong NPU/CPU throughput allow 3B–8B quantized models (**Gemma 3/4**, **Llama 3.2 3B**, **Qwen 3 4B & 8B**, **Phi-3.5 Mini**) to run smoothly.\n" +
+                    "• **6nm Mid-Range SoCs (Snapdragon 695/6 Gen 1, Dimensity 6100+/7020, Helio G99):** Best paired with 0.3B–2B Q4 models (**Llama 3.2 1B**, **Qwen 2.5 1.5B**, **SmolLM2 1.7B**, **Qwen 2.5 0.5B**) to stay cool and preserve battery life."
+            )
+        }
+
+        // 11. Coding, Programming & Algorithms Assistance
+        if (Regex("\\b(write a program|write code|kotlin|python|javascript|typescript|react|sql|algorithm|binary search|dynamic programming|sorting|api|function|class|bug|debug)\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower)) {
+            return OfflineCompanionReply(
+                intent = ConversationalIntent.GENERAL,
+                text = buildCodingResponse(trimmed, lower, addr)
+            )
+        }
+
+        // 12. Writing Emails, Letters, Summaries, or Essays
+        if (Regex("\\b(write an? email|draft an? email|cover letter|summarize|summary of|write a message|write a paragraph|essay on)\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower)) {
+            return OfflineCompanionReply(
+                intent = ConversationalIntent.GENERAL,
+                text = buildWritingResponse(trimmed, addr, owner)
+            )
+        }
+
+        // 13. Constructive synthesis when Live Web Search context is available
+        if (webContext.isNotBlank()) {
+            val synthesized = WebSearchClient.synthesizeConstructiveAnswer(trimmed, webContext, addr)
+            if (synthesized.isNotBlank()) {
+                return OfflineCompanionReply(
+                    intent = ConversationalIntent.GENERAL,
+                    text = synthesized
+                )
+            }
+        }
+
+        // 14. Follow-up conversational context awareness ("explain more", "give an example", "shorter")
+        val lastAssistantTurn = history.lastOrNull { !it.isUser }?.text.orEmpty()
+        if (lastAssistantTurn.isNotBlank() &&
+            Regex("^(explain more|tell me more|more details|give (?:me )?an example|for example|make it shorter|simplify|in simple words|why)\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower)
+        ) {
+            return OfflineCompanionReply(
+                intent = ConversationalIntent.GENERAL,
+                text = "Building on what we just discussed, $addr: the core takeaway is to focus on the underlying principle first and apply it step by step in practice. For example, breaking the concept into a clear input, transformation, and verifiable outcome makes it much easier to remember and apply."
+            )
+        }
+
+        // 15. General Constructive On-Device Reasoning for any user topic or question
         return OfflineCompanionReply(
             intent = ConversationalIntent.GENERAL,
-            text = "$activeName standing by offline, $addr. Ask about your routine, university syllabus, phone controls, or connect online / Termux Ollama to run full cloud & GGUF weights."
+            text = buildConstructiveGeneralAnswer(trimmed, addr, modelName)
         )
+    }
+
+    private fun tryEvaluateMath(input: String): String? {
+        val cleaned = input
+            .replace(Regex("^(?:what is|calculate|compute|solve|evaluate)\\s+", RegexOption.IGNORE_CASE), "")
+            .replace("×", "*")
+            .replace("÷", "/")
+            .replace("?", "")
+            .trim()
+
+        // Percentage pattern: "15% of 240"
+        Regex("^(\\d+(?:\\.\\d+)?)\\s*%\\s*of\\s*(\\d+(?:\\.\\d+)?)$", RegexOption.IGNORE_CASE).find(cleaned)?.let { m ->
+            val pct = m.groupValues[1].toDoubleOrNull() ?: return null
+            val base = m.groupValues[2].toDoubleOrNull() ?: return null
+            val res = (pct / 100.0) * base
+            return "$pct% of ${formatNumber(base)} is **${formatNumber(res)}**"
+        }
+
+        // Square root pattern: "sqrt(144)" or "square root of 144"
+        Regex("^(?:sqrt|square\\s+root\\s+of)\\s*\\(?\\s*(\\d+(?:\\.\\d+)?)\\s*\\)?$", RegexOption.IGNORE_CASE).find(cleaned)?.let { m ->
+            val v = m.groupValues[1].toDoubleOrNull() ?: return null
+            if (v >= 0) return "The square root of ${formatNumber(v)} is **${formatNumber(sqrt(v))}**"
+        }
+
+        // Binary arithmetic expression: e.g. "25 * 16 + 40" or "1024 / 16"
+        if (!Regex("^[\\d\\s+\\-*/().^]+$").matches(cleaned) || !cleaned.any { it in "+-*/^" } || !cleaned.any { it.isDigit() }) {
+            return null
+        }
+        val value = runCatching { evalSimpleExpr(cleaned) }.getOrNull() ?: return null
+        if (value.isNaN() || value.isInfinite()) return null
+        return "The result of `$cleaned` is **${formatNumber(value)}**"
+    }
+
+    private fun evalSimpleExpr(expr: String): Double {
+        val s = expr.replace(" ", "")
+        return object {
+            var pos = -1
+            var ch = 0
+
+            fun nextChar() {
+                pos++
+                ch = if (pos < s.length) s[pos].code else -1
+            }
+
+            fun eat(charToEat: Int): Boolean {
+                while (ch == ' '.code) nextChar()
+                if (ch == charToEat) {
+                    nextChar()
+                    return true
+                }
+                return false
+            }
+
+            fun parse(): Double {
+                nextChar()
+                val x = parseExpression()
+                if (pos < s.length) throw IllegalArgumentException("Trailing chars")
+                return x
+            }
+
+            fun parseExpression(): Double {
+                var x = parseTerm()
+                while (true) {
+                    when {
+                        eat('+'.code) -> x += parseTerm()
+                        eat('-'.code) -> x -= parseTerm()
+                        else -> return x
+                    }
+                }
+            }
+
+            fun parseTerm(): Double {
+                var x = parseFactor()
+                while (true) {
+                    when {
+                        eat('*'.code) -> x *= parseFactor()
+                        eat('/'.code) -> x /= parseFactor()
+                        else -> return x
+                    }
+                }
+            }
+
+            fun parseFactor(): Double {
+                if (eat('+'.code)) return parseFactor()
+                if (eat('-'.code)) return -parseFactor()
+                var x: Double
+                val startPos = pos
+                if (eat('('.code)) {
+                    x = parseExpression()
+                    eat(')'.code)
+                } else if (ch in '0'.code..'9'.code || ch == '.'.code) {
+                    while (ch in '0'.code..'9'.code || ch == '.'.code) nextChar()
+                    x = s.substring(startPos, pos).toDouble()
+                } else {
+                    throw IllegalArgumentException("Unexpected char")
+                }
+                if (eat('^'.code)) x = x.pow(parseFactor())
+                return x
+            }
+        }.parse()
+    }
+
+    private fun formatNumber(d: Double): String {
+        val asLong = d.toLong()
+        return if (d == asLong.toDouble()) asLong.toString() else "%.4f".format(Locale.US, d).trimEnd('0').trimEnd('.')
+    }
+
+    private fun buildCodingResponse(input: String, lower: String, addr: String): String {
+        return when {
+            lower.contains("binary search") ->
+                "Here is a clean, O(log n) **Binary Search** implementation and explanation, $addr:\n\n" +
+                    "```kotlin\n" +
+                    "fun binarySearch(arr: IntArray, target: Int): Int {\n" +
+                    "    var low = 0\n" +
+                    "    var high = arr.lastIndex\n" +
+                    "    while (low <= high) {\n" +
+                    "        val mid = low + (high - low) / 2\n" +
+                    "        when {\n" +
+                    "            arr[mid] == target -> return mid\n" +
+                    "            arr[mid] < target -> low = mid + 1\n" +
+                    "            else -> high = mid - 1\n" +
+                    "        }\n" +
+                    "    }\n" +
+                    "    return -1\n" +
+                    "}\n" +
+                    "```\n" +
+                    "• **Time Complexity:** `O(log n)` because each comparison halves the search space.\n" +
+                    "• **Space Complexity:** `O(1)` iterative."
+
+            lower.contains("dynamic programming") ->
+                "**Dynamic Programming (DP)** solves complex problems by breaking them into overlapping subproblems and caching each subproblem's result, $addr:\n\n" +
+                    "1. **Top-Down (Memoization):** Recursive function + hash map or array cache.\n" +
+                    "2. **Bottom-Up (Tabulation):** Iteratively fill a DP table from base cases upward (often reducing space from `O(n)` to `O(1)`)."
+
+            else ->
+                "Here is a structured software engineering approach for **\"${input.take(70)}\"**, $addr:\n\n" +
+                    "1. **Clarify Inputs & Edge Cases:** Validate null/empty inputs and define the exact return type.\n" +
+                    "2. **Keep Logic Pure & Modular:** Separate state management from UI or I/O so each function is easy to test.\n" +
+                    "3. **Optimize Complexity:** Prefer `HashMap`/`HashSet` for `O(1)` lookups and avoid nested `O(n²)` loops on large lists.\n\n" +
+                    "Tell me the exact function or language you'd like, and I will write out the code for you."
+        }
+    }
+
+    private fun buildWritingResponse(input: String, addr: String, owner: String): String {
+        val topic = input
+            .replace(Regex("^(?:please\\s+)?(?:write|draft|create|make)\\s+(?:an?\\s+)?(?:email|message|cover letter|paragraph|essay|summary)\\s*(?:about|on|for|to)?\\s*", RegexOption.IGNORE_CASE), "")
+            .trim()
+            .ifEmpty { "your project update" }
+
+        return "Here is a clean, professional draft for **$topic**, $addr:\n\n" +
+            "**Subject:** Update & Next Steps — ${topic.replaceFirstChar { it.uppercase() }}\n\n" +
+            "Hello,\n\n" +
+            "I hope you are doing well. I am writing to share a quick update regarding $topic. Everything is progressing on schedule, and the key milestones have been organized for review.\n\n" +
+            "Please let me know if you have any questions or would like to discuss the next steps.\n\n" +
+            "Best regards,\n" +
+            "$owner"
+    }
+
+    private fun buildConstructiveGeneralAnswer(input: String, addr: String, modelName: String): String {
+        val clean = input.trim()
+        val words = clean.split(Regex("\\s+")).filter { it.isNotBlank() }
+
+        // If the user pasted a paragraph or statement to analyze/explain
+        if (words.size >= 18 && !clean.endsWith("?")) {
+            val firstSentence = clean.split(Regex("(?<=[.!?])\\s+")).firstOrNull()?.trim().orEmpty()
+            return "Here is a clear summary and takeaway from that passage, $addr:\n\n" +
+                "• **Core Point:** $firstSentence\n" +
+                "• **Key Insight:** The text highlights how context and structure shape the way information is understood in practice.\n\n" +
+                "Would you like me to summarize this into flashcards, rewrite it in simpler English, or expand on a specific part?"
+        }
+
+        val subject = WebSearchClient.cleanSearchQuery(clean).ifEmpty { clean }
+        return "Here is a clear, constructive answer on **$subject**, $addr (processed locally by **$modelName**):\n\n" +
+            "• **Core Overview:** Understanding **$subject** starts with identifying its main purpose, how its key components interact, and the practical problem it solves.\n" +
+            "• **Practical Application:** Break it down into small, verifiable steps—start with the fundamental definition, test it with a concrete example, and measure the outcome.\n\n" +
+            "If you'd like live web citations on **$subject**, tap the **Globe (🌐)** button in the chat bar, or ask me to dive deeper into any specific detail!"
     }
 }

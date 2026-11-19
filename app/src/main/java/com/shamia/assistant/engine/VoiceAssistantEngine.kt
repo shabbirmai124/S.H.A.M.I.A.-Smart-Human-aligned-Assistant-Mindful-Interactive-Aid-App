@@ -25,6 +25,13 @@ import java.util.Locale
 import kotlin.math.PI
 import kotlin.math.sin
 
+enum class EarconKind {
+    LISTEN_START,
+    SEND_PROMPT,
+    REPLY_READY,
+    STOPPED
+}
+
 class VoiceAssistantEngine(private val context: Context) {
 
     private var tts: TextToSpeech? = null
@@ -37,6 +44,8 @@ class VoiceAssistantEngine(private val context: Context) {
     private var ambientJob: Job? = null
     @Volatile
     private var ambientVolume: Float = 0.25f
+    @Volatile
+    private var interactionSoundEnabled: Boolean = true
 
     fun initTts(
         initialGender: com.shamia.assistant.model.VoiceGender = com.shamia.assistant.model.VoiceGender.FEMALE,
@@ -45,9 +54,9 @@ class VoiceAssistantEngine(private val context: Context) {
         currentVoiceGender = initialGender
         tts = TextToSpeech(context.applicationContext) { status ->
             if (status == TextToSpeech.SUCCESS) {
-                val res = tts?.setLanguage(Locale.UK)
+                val res = tts?.setLanguage(Locale.US)
                 if (res == TextToSpeech.LANG_MISSING_DATA || res == TextToSpeech.LANG_NOT_SUPPORTED) {
-                    tts?.setLanguage(Locale.US)
+                    tts?.setLanguage(Locale.UK)
                 }
                 ttsReady = true
                 applyVoiceProfile(currentVoiceGender)
@@ -57,6 +66,59 @@ class VoiceAssistantEngine(private val context: Context) {
                     @Deprecated("Deprecated in Java")
                     override fun onError(utteranceId: String?) = mainHandler.post { onSpeakingChanged(false) }.let {}
                 })
+            }
+        }
+    }
+
+    fun setInteractionSoundEnabled(enabled: Boolean) {
+        interactionSoundEnabled = enabled
+    }
+
+    fun playInteractionEarcon(kind: EarconKind) {
+        if (!interactionSoundEnabled) return
+        val notes: List<Pair<Double, Int>> = when (kind) {
+            EarconKind.LISTEN_START -> listOf(440.0 to 70, 659.25 to 95)
+            EarconKind.SEND_PROMPT -> listOf(528.0 to 55)
+            EarconKind.REPLY_READY -> listOf(523.25 to 65, 659.25 to 85)
+            EarconKind.STOPPED -> listOf(460.0 to 60, 330.0 to 80)
+        }
+        audioScope.launch {
+            val sampleRate = 22050
+            for ((freq, durationMs) in notes) {
+                val count = ((sampleRate * durationMs) / 1000.0).toInt().coerceAtLeast(256)
+                val buf = ShortArray(count)
+                for (i in 0 until count) {
+                    val progress = i.toDouble() / count
+                    val env = sin(PI * progress)
+                    val sample = (sin(2.0 * PI * freq * i / sampleRate) * 4200 * env).toInt()
+                    buf[i] = sample.coerceIn(-32767, 32767).toShort()
+                }
+                val track = runCatching {
+                    AudioTrack.Builder()
+                        .setAudioAttributes(
+                            AudioAttributes.Builder()
+                                .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
+                                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                                .build()
+                        )
+                        .setAudioFormat(
+                            AudioFormat.Builder()
+                                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                                .setSampleRate(sampleRate)
+                                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                                .build()
+                        )
+                        .setBufferSizeInBytes(buf.size * 2)
+                        .setTransferMode(AudioTrack.MODE_STATIC)
+                        .build()
+                }.getOrNull() ?: continue
+                runCatching {
+                    track.write(buf, 0, buf.size)
+                    track.play()
+                    delay(durationMs.toLong() + 15L)
+                    track.stop()
+                    track.release()
+                }
             }
         }
     }
@@ -96,22 +158,23 @@ class VoiceAssistantEngine(private val context: Context) {
             } else {
                 engine.setPitch(0.88f)
             }
-            // Measured, natural articulation (0.92f) for crisp comprehension by non-native listeners
-            engine.setSpeechRate(0.92f)
+            engine.setSpeechRate(0.95f)
         }
     }
 
     fun speak(text: String) {
         if (!ttsReady) return
         val clean = text
+            .replace(Regex("```[\\s\\S]*?```"), " code block ")
             .replace(Regex("\\[(?:Active )?Model:[^\\]]+\\]", RegexOption.IGNORE_CASE), "")
             .replace(Regex("\\[ENG_TIP:[^\\]]+\\]"), "")
             .replace(Regex("\\[COACH_TIP\\][\\s\\S]*?\\[/COACH_TIP\\]"), "")
-            .replace(Regex("[*_`#]"), "")
+            .replace(Regex("[*_`#•]"), "")
+            .replace(Regex("\\s+"), " ")
             .trim()
         if (clean.isEmpty()) return
         runCatching {
-            tts?.speak(clean, TextToSpeech.QUEUE_FLUSH, null, "shamia_${System.currentTimeMillis()}")
+            tts?.speak(clean.take(900), TextToSpeech.QUEUE_FLUSH, null, "shamia_${System.currentTimeMillis()}")
         }
     }
 
@@ -122,12 +185,17 @@ class VoiceAssistantEngine(private val context: Context) {
     fun startListening(
         onPartial: (String) -> Unit,
         onFinal: (String) -> Unit,
-        onError: (String) -> Unit
+        onError: (String) -> Unit,
+        onFallbackToSystemVoiceDialog: (() -> Unit)? = null
     ) {
         mainHandler.post {
             runCatching {
                 if (!SpeechRecognizer.isRecognitionAvailable(context)) {
-                    onError("Android SpeechRecognizer is unavailable on this device.")
+                    if (onFallbackToSystemVoiceDialog != null) {
+                        onFallbackToSystemVoiceDialog()
+                    } else {
+                        onError("Voice recognition service is unavailable on this device.")
+                    }
                     return@post
                 }
                 speechRecognizer?.destroy()
@@ -156,7 +224,7 @@ class VoiceAssistantEngine(private val context: Context) {
                             val msg = when (error) {
                                 SpeechRecognizer.ERROR_AUDIO -> "Microphone audio error."
                                 SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Grant Microphone permission in Android Settings."
-                                SpeechRecognizer.ERROR_NO_MATCH -> "Did not catch that clearly—please try again."
+                                SpeechRecognizer.ERROR_NO_MATCH -> "Didn't catch that clearly—tap the core to try again."
                                 SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Listening timed out."
                                 else -> "Voice recognition unavailable right now."
                             }
@@ -173,7 +241,11 @@ class VoiceAssistantEngine(private val context: Context) {
                 }
                 speechRecognizer?.startListening(intent)
             }.onFailure {
-                onError("Could not start microphone listener on this device.")
+                if (onFallbackToSystemVoiceDialog != null) {
+                    onFallbackToSystemVoiceDialog()
+                } else {
+                    onError("Could not start microphone listener on this device.")
+                }
             }
         }
     }

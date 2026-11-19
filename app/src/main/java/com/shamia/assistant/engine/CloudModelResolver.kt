@@ -15,8 +15,8 @@ internal object CloudModelResolver {
     }
 
     /**
-     * Resolves strict, zero-latency cloud routing candidates for the selected model spec.
-     * Never routes non-DeepSeek models (such as Gemma 4 or GPT-OSS 20B) to DeepSeek.
+     * Resolves strict, zero-latency routing candidates for the selected model spec.
+     * Never routes non-DeepSeek models to DeepSeek.
      */
     fun resolveCloudCandidates(spec: OpenSourceModelSpec): List<String> {
         val desired = mutableListOf<String>()
@@ -31,7 +31,7 @@ internal object CloudModelResolver {
             spec.id.contains("llama") -> desired += listOf("llama", "openai-fast", "openai")
             spec.id.contains("phi") -> desired += listOf("openai-fast", "mistral", "openai")
             spec.id.contains("smollm") -> desired += listOf("openai-fast", "llama", "openai")
-            spec.id.contains("offline-core") -> desired += listOf("deepseek", "deepseek-reasoning", "openai-fast")
+            spec.id.contains("offline-core") -> desired += listOf("openai-fast", "openai")
             else -> {
                 if (spec.cloudModelId.isNotBlank()) desired += spec.cloudModelId.trim()
                 desired += listOf("openai-fast", "openai")
@@ -40,19 +40,15 @@ internal object CloudModelResolver {
         return desired.filter { it.isNotBlank() }.distinct().take(3)
     }
 
-    /**
-     * Strips any model header prefixes from history turns before sending to an LLM so
-     * previous turns from another model cannot contaminate or bias the active model.
-     */
     fun stripHeaderFromHistoryText(text: String): String {
         return text
-            .replace(Regex("^\\s*\\[[^\\]]*?(?:Model|Offline Core|ID:)[^\\]]*\\]\\s*", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("^\\s*\\[[^\\]]*?(?:Model|Offline Core|ID:|Backend:)[^\\]]*\\]\\s*", RegexOption.IGNORE_CASE), "")
             .trim()
     }
 
     /**
-     * Ensures the model output strictly reflects the currently active model and user identity,
-     * stripping any stale/cached DeepSeek or offline-core references when another model is active.
+     * Cleans HTML entities, strips robotic bracketed headers, and prevents stale model names
+     * from appearing in the natural human-toned assistant response.
      */
     fun sanitizeReplyForActiveModel(
         rawText: String,
@@ -61,15 +57,15 @@ internal object CloudModelResolver {
         executedBackendId: String
     ): String {
         val ownerName = identity.fullName.trim().ifEmpty { "Md Shabbir Mia" }
-        var cleaned = rawText.trim()
+        var cleaned = WebSearchClient.decodeHtmlEntities(rawText.trim())
 
-        // Remove any leading bracketed model tag generated or cached by remote endpoints
+        // Remove any leading bracketed model/backend debug tag so the user gets a pure human response
         cleaned = cleaned
             .replace(Regex("^\\s*\\[(?:Active\\s+)?Model:[^\\]]+\\]\\s*", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("^\\s*\\[[^\\]]*?(?:Offline Core|ID:\\s*offline-core|DeepSeek\\s*2B)[^\\]]*\\]\\s*", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("^\\s*\\[[^\\]]*?(?:Offline Core|ID:\\s*offline-core|DeepSeek\\s*2B|Web Grounded Fallback|Local Mode)[^\\]]*\\]\\s*", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("For full .*? inference offline in Termux.*?`\\.", RegexOption.IGNORE_CASE), "")
             .trim()
 
-        // If the active model is NOT offline-core, scrub any hallucinated or cached DeepSeek Offline Core self-identification
         if (!activeSpec.isBuiltInOffline && activeSpec.id != "offline-core") {
             cleaned = cleaned
                 .replace("DeepSeek 2B · S.H.A.M.I.A. Offline Core", activeSpec.name, ignoreCase = true)
@@ -80,11 +76,13 @@ internal object CloudModelResolver {
                 .replace("deepseek-r1:1.5b", executedBackendId, ignoreCase = true)
         }
 
-        // Fix any cached third-party owner name back to the active user's configured identity
         if (!ownerName.equals("Kajol", ignoreCase = true)) {
-            cleaned = cleaned.replace(Regex("\\bcreated\\s+by\\s+and\\s+for\\s+Kajol\\b", RegexOption.IGNORE_CASE), "created by and for $ownerName")
+            cleaned = cleaned.replace(
+                Regex("\\bcreated\\s+by\\s+and\\s+for\\s+Kajol\\b", RegexOption.IGNORE_CASE),
+                "created by and for $ownerName"
+            )
         }
 
-        return "[Model: ${activeSpec.name} · ID: ${activeSpec.id} | Backend: $executedBackendId]\n$cleaned"
+        return cleaned.trim()
     }
 }

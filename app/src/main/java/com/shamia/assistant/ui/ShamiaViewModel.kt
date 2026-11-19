@@ -6,6 +6,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.shamia.assistant.engine.DeviceExecutor
 import com.shamia.assistant.engine.DeviceTelemetryMonitor
+import com.shamia.assistant.engine.EarconKind
 import com.shamia.assistant.engine.IntentEngine
 import com.shamia.assistant.engine.ModelCatalog
 import com.shamia.assistant.engine.ModelDownloadManager
@@ -29,12 +30,14 @@ import com.shamia.assistant.model.PermissionPolicy
 import com.shamia.assistant.model.RoutineCategory
 import com.shamia.assistant.model.UserIdentityProfile
 import com.shamia.assistant.model.VoiceGender
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -45,64 +48,64 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
     private val telemetryMonitor = DeviceTelemetryMonitor(application)
     val voiceEngine = VoiceAssistantEngine(application)
 
-    private val _ui = MutableStateFlow(ShamiaUiState())
+    private val _ui = MutableStateFlow(ShamiaUiState(clockLabel = clockFormat()))
     val ui: StateFlow<ShamiaUiState> = _ui.asStateFlow()
 
     private var generationJob: Job? = null
+    private var streamingMessageId: String? = null
 
     init {
-        val identity = store.loadIdentity()
-        val hardware = OpenSourceAiRepository.detectHardware(application)
-        val controls = store.loadControls()
-        val selectedModelId = store.loadSelectedModelId()
-        val customModels = store.loadCustomModels()
-        val allModels = ModelCatalog.CATALOG + customModels
-        val recommended = ModelDownloadManager.recommendSafeDefaultModel(hardware, allModels)
-        val savedSpec = allModels.find { it.id == selectedModelId } ?: recommended
-        val oomSafeStart = if (hardware.isLowMemory && !savedSpec.isBuiltInOffline) recommended else savedSpec
-        val startBanner = if (oomSafeStart.id != savedSpec.id) {
-            "OOM Protection switched to ${oomSafeStart.name} for smooth performance."
-        } else null
-        val initialSession = "session-${System.currentTimeMillis()}"
+        viewModelScope.launch(Dispatchers.IO) {
+            val identity = store.loadIdentity()
+            val hardware = OpenSourceAiRepository.detectHardware(application)
+            val controls = store.loadControls()
+            val selectedModelId = store.loadSelectedModelId()
+            val customModels = store.loadCustomModels()
+            val allModels = ModelCatalog.CATALOG + customModels
+            val recommended = ModelDownloadManager.recommendSafeDefaultModel(hardware, allModels)
+            val savedSpec = allModels.find { it.id == selectedModelId } ?: recommended
+            val initialSession = "session-${System.currentTimeMillis()}"
+            val initialGender = VoiceGender.entries.firstOrNull { it.name == store.loadVoiceGender() } ?: VoiceGender.FEMALE
+            val soundEnabled = store.loadInteractionSoundEnabled()
+            voiceEngine.setInteractionSoundEnabled(soundEnabled)
 
-        val initialGender = VoiceGender.entries.firstOrNull { it.name == store.loadVoiceGender() } ?: VoiceGender.FEMALE
-
-        _ui.update {
-            it.copy(
-                chatSessionId = initialSession,
-                identity = identity,
-                hardware = hardware,
-                clockLabel = clockFormat(),
-                routine = store.loadRoutine(),
-                syllabus = store.loadSyllabus(),
-                tasks = store.loadTasks(),
-                notes = store.loadNotes(),
-                controls = controls,
-                permissions = store.loadPermissions(),
-                customModels = customModels,
-                installedModelIds = store.loadInstalledModelIds(),
-                installedVoiceIds = store.loadInstalledVoiceIds(),
-                selectedModelId = oomSafeStart.id,
-                recommendedModelId = recommended.id,
-                voiceGender = initialGender,
-                showAllModels = store.loadShowAllModels(),
-                ensembleEnabled = store.loadEnsembleEnabled(),
-                ensembleModelIds = store.loadEnsembleIds(),
-                useResearch = store.loadUseResearch(),
-                ollamaEndpoint = store.loadOllamaEndpoint(),
-                serverBaseUrl = store.loadServerBaseUrl(),
-                messages = listOf(buildWelcomeMessage(identity, oomSafeStart, initialSession)),
-                statusBanner = startBanner
-            )
-        }
-
-        voiceEngine.initTts(initialGender) { isSpeaking ->
-            _ui.update { state ->
-                state.copy(
-                    coreState = if (isSpeaking) CoreVisualState.SPEAKING
-                    else if (state.coreState == CoreVisualState.SPEAKING) CoreVisualState.IDLE
-                    else state.coreState
+            _ui.update {
+                it.copy(
+                    chatSessionId = initialSession,
+                    identity = identity,
+                    hardware = hardware,
+                    clockLabel = clockFormat(),
+                    routine = store.loadRoutine(),
+                    syllabus = store.loadSyllabus(),
+                    tasks = store.loadTasks(),
+                    notes = store.loadNotes(),
+                    controls = controls,
+                    permissions = store.loadPermissions(),
+                    customModels = customModels,
+                    installedModelIds = store.loadInstalledModelIds() + setOf("offline-core", "gemma-3-free", "llama-32-free"),
+                    installedVoiceIds = store.loadInstalledVoiceIds(),
+                    selectedModelId = savedSpec.id,
+                    recommendedModelId = recommended.id,
+                    voiceGender = initialGender,
+                    interactionSoundEnabled = soundEnabled,
+                    showAllModels = store.loadShowAllModels(),
+                    ensembleEnabled = store.loadEnsembleEnabled(),
+                    ensembleModelIds = store.loadEnsembleIds(),
+                    useResearch = store.loadUseResearch(),
+                    ollamaEndpoint = store.loadOllamaEndpoint(),
+                    serverBaseUrl = store.loadServerBaseUrl(),
+                    messages = listOf(buildWelcomeMessage(identity, savedSpec, initialSession))
                 )
+            }
+
+            voiceEngine.initTts(initialGender) { isSpeaking ->
+                _ui.update { state ->
+                    state.copy(
+                        coreState = if (isSpeaking) CoreVisualState.SPEAKING
+                        else if (state.coreState == CoreVisualState.SPEAKING) CoreVisualState.IDLE
+                        else state.coreState
+                    )
+                }
             }
         }
 
@@ -112,7 +115,8 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
 
         viewModelScope.launch {
             while (true) {
-                delay(1000L)
+                val hasActiveAlarm = _ui.value.alarms.any { it.active }
+                delay(if (hasActiveAlarm) 1000L else 15_000L)
                 _ui.update { it.copy(nowMillis = System.currentTimeMillis(), clockLabel = clockFormat()) }
             }
         }
@@ -123,24 +127,57 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
         activeSpec: OpenSourceModelSpec,
         sessionId: String
     ): HudMessage {
-        val backendTag = activeSpec.ollamaTag ?: activeSpec.cloudModelId
+        val addr = identity.addressAs.trim().ifEmpty { "Sir" }
         return HudMessage(
             id = "welcome-$sessionId",
             isUser = false,
             sessionId = sessionId,
             modelIdForTurn = activeSpec.id,
-            text = "Good day, ${identity.addressAs}. S.H.A.M.I.A. is ready for ${identity.fullName}. Currently locked to ${activeSpec.name} ($backendTag) with strict cache bypass enabled.",
+            text = "Good to see you, $addr. How can I help today?",
             timestampLabel = nowLabel(),
-            source = if (activeSpec.isBuiltInOffline) MessageSource.OFFLINE_CORE else MessageSource.CLOUD_OPEN,
+            source = MessageSource.OFFLINE_CORE,
             modelLabel = activeSpec.name
         )
     }
 
     private fun nowLabel(): String = SimpleDateFormat("hh:mm a", Locale.getDefault()).format(Date())
-    private fun clockFormat(): String = SimpleDateFormat("EEE, MMM d · hh:mm:ss a", Locale.getDefault()).format(Date())
+    private fun clockFormat(): String = SimpleDateFormat("EEE, MMM d · hh:mm a", Locale.getDefault()).format(Date())
     private fun appendMessage(msg: HudMessage) = _ui.update { it.copy(messages = (it.messages + msg).takeLast(80)) }
 
     fun clearBanner() = _ui.update { it.copy(statusBanner = null) }
+
+    fun stopGeneration() {
+        val activeMsgId = streamingMessageId
+        generationJob?.cancel()
+        generationJob = null
+        streamingMessageId = null
+        voiceEngine.stopSpeaking()
+        voiceEngine.stopListening()
+        voiceEngine.playInteractionEarcon(EarconKind.STOPPED)
+        _ui.update { state ->
+            val updatedMessages = if (activeMsgId != null) {
+                state.messages.map { m ->
+                    if (m.id == activeMsgId) {
+                        val currentText = m.text.removeSuffix(" ▍").trim()
+                        m.copy(
+                            text = if (currentText.isEmpty() || currentText == "Thinking...") {
+                                "Response stopped."
+                            } else {
+                                "$currentText\n\n*(Stopped)*"
+                            }
+                        )
+                    } else m
+                }
+            } else state.messages
+            state.copy(
+                isGenerating = false,
+                coreState = CoreVisualState.IDLE,
+                liveTranscript = "",
+                messages = updatedMessages,
+                statusBanner = "Stopped."
+            )
+        }
+    }
 
     fun startNewChat() {
         startNewChatWithModel(_ui.value.selectedModelId)
@@ -149,22 +186,20 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
     fun startNewChatWithModel(modelId: String) {
         generationJob?.cancel()
         generationJob = null
+        streamingMessageId = null
         voiceEngine.stopSpeaking()
         val chosen = _ui.value.allModels.find { it.id == modelId } ?: _ui.value.selectedModel
         store.saveSelectedModelId(chosen.id)
         val freshSession = "session-${System.currentTimeMillis()}"
-        Log.i(
-            "ShamiaModelRouter",
-            "NEW CHAT WITH MODEL | session=$freshSession | id=${chosen.id} | ollama=${chosen.ollamaTag} | cloud=${chosen.cloudModelId}"
-        )
         _ui.update {
             it.copy(
                 chatSessionId = freshSession,
                 selectedModelId = chosen.id,
+                isGenerating = false,
                 coreState = CoreVisualState.IDLE,
                 liveTranscript = "",
                 messages = listOf(buildWelcomeMessage(it.identity, chosen, freshSession)),
-                statusBanner = "New chat started with ${chosen.name} (${chosen.ollamaTag ?: chosen.cloudModelId})."
+                statusBanner = "Switched to ${chosen.name} (${chosen.sizeLabel})."
             )
         }
     }
@@ -172,11 +207,17 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
     fun selectModel(modelId: String) {
         val chosen = _ui.value.allModels.find { it.id == modelId } ?: return
         store.saveSelectedModelId(chosen.id)
-        Log.i("ShamiaModelRouter", "MODEL SWITCH -> id=${chosen.id}, ollama=${chosen.ollamaTag}, cloud=${chosen.cloudModelId}")
-        _ui.update {
-            it.copy(
+        Log.i("ShamiaModelRouter", "MODEL SWITCH -> id=${chosen.id}, name=${chosen.name}")
+        _ui.update { state ->
+            val updatedMessages = if (state.messages.size == 1 && state.messages.first().id.startsWith("welcome-")) {
+                listOf(buildWelcomeMessage(state.identity, chosen, state.chatSessionId))
+            } else {
+                state.messages
+            }
+            state.copy(
                 selectedModelId = chosen.id,
-                statusBanner = "Active model: ${chosen.name} (${chosen.ollamaTag ?: chosen.cloudModelId})."
+                messages = updatedMessages,
+                statusBanner = "Active model: ${chosen.name} (${chosen.sizeLabel})."
             )
         }
     }
@@ -188,6 +229,9 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
         val addr = state.identity.addressAs.ifBlank { "Sir" }
         val activeSpec = state.selectedModel
         val currentSession = state.chatSessionId
+
+        voiceEngine.stopSpeaking()
+        voiceEngine.playInteractionEarcon(EarconKind.SEND_PROMPT)
 
         appendMessage(
             HudMessage(
@@ -227,22 +271,39 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
                         modelIdForTurn = activeSpec.id,
                         intent = local.intent,
                         source = MessageSource.OFFLINE_CORE,
-                        modelLabel = "Local Device Engine"
+                        modelLabel = activeSpec.name
                     )
                 )
+                voiceEngine.playInteractionEarcon(EarconKind.REPLY_READY)
                 if (_ui.value.voiceReplyEnabled) voiceEngine.speak(reply)
             }
             return
         }
 
         val intent = IntentEngine.detectConversationalIntent(text)
-        val shouldSearch = IntentEngine.shouldTriggerLiveSearch(text, state.useResearch)
+        val shouldSearch = state.useResearch
         val isolatedHistory = _ui.value.messages
             .filter { it.sessionId == currentSession && it.modelIdForTurn == activeSpec.id && !it.id.startsWith("welcome-") }
             .dropLast(1)
 
         generationJob?.cancel()
-        _ui.update { it.copy(coreState = CoreVisualState.THINKING) }
+        val msgId = "a-${System.currentTimeMillis()}"
+        streamingMessageId = msgId
+
+        appendMessage(
+            HudMessage(
+                id = msgId,
+                isUser = false,
+                text = "Thinking...",
+                timestampLabel = nowLabel(),
+                sessionId = currentSession,
+                modelIdForTurn = activeSpec.id,
+                intent = intent,
+                source = MessageSource.OFFLINE_CORE,
+                modelLabel = activeSpec.name
+            )
+        )
+        _ui.update { it.copy(coreState = CoreVisualState.THINKING, isGenerating = true) }
 
         generationJob = viewModelScope.launch {
             val activeTasks = _ui.value.tasks.filter { !it.completed }.map { it.title }
@@ -259,7 +320,8 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
                     ensembleModelIds = _ui.value.ensembleModelIds,
                     useResearch = shouldSearch,
                     routine = _ui.value.routine,
-                    syllabus = _ui.value.syllabus
+                    syllabus = _ui.value.syllabus,
+                    isOnline = _ui.value.telemetry.isOnline
                 )
             } else {
                 OpenSourceAiRepository.dispatchStrictModelRequest(
@@ -274,7 +336,8 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
                     sameModelHistory = isolatedHistory,
                     ollamaEndpoint = _ui.value.ollamaEndpoint,
                     serverBaseUrl = _ui.value.serverBaseUrl,
-                    useResearch = shouldSearch
+                    useResearch = shouldSearch,
+                    isOnline = _ui.value.telemetry.isOnline
                 )
             }
 
@@ -283,24 +346,47 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
                 OfflineCompanion.generateReply(text, addr, _ui.value.identity.fullName, _ui.value.routine, _ui.value.syllabus, activeSpec).coachingTip
             } else extractedTip
 
-            _ui.update { it.copy(coreState = CoreVisualState.IDLE) }
-            appendMessage(
-                HudMessage(
-                    id = "a-${System.currentTimeMillis()}",
-                    isUser = false,
-                    text = cleanText,
-                    timestampLabel = nowLabel(),
-                    sessionId = currentSession,
-                    modelIdForTurn = activeSpec.id,
-                    intent = intent,
-                    source = result.source,
-                    modelLabel = result.modelLabel,
-                    executionMeta = result.executionMeta,
-                    coachingTip = fallbackTip,
-                    showBreathingGuide = intent == ConversationalIntent.MENTAL_SUPPORT,
-                    groundingLinks = result.groundingLinks
+            // Stream the response smoothly like ChatGPT / Gemini so the user can read as it generates or tap Stop
+            val words = cleanText.split(" ")
+            val stepSize = (words.size / 14).coerceIn(2, 8)
+            var index = stepSize
+            while (index < words.size && isActive) {
+                val partial = words.take(index).joinToString(" ") + " ▍"
+                _ui.update { s ->
+                    s.copy(
+                        messages = s.messages.map { m ->
+                            if (m.id == msgId) m.copy(text = partial, modelLabel = result.modelLabel) else m
+                        }
+                    )
+                }
+                delay(28L)
+                index += stepSize
+            }
+
+            if (!isActive) return@launch
+
+            streamingMessageId = null
+            _ui.update { s ->
+                s.copy(
+                    isGenerating = false,
+                    coreState = CoreVisualState.IDLE,
+                    messages = s.messages.map { m ->
+                        if (m.id == msgId) {
+                            m.copy(
+                                text = cleanText,
+                                intent = intent,
+                                source = result.source,
+                                modelLabel = result.modelLabel,
+                                executionMeta = result.executionMeta,
+                                coachingTip = fallbackTip,
+                                showBreathingGuide = intent == ConversationalIntent.MENTAL_SUPPORT,
+                                groundingLinks = result.groundingLinks
+                            )
+                        } else m
+                    }
                 )
-            )
+            }
+            voiceEngine.playInteractionEarcon(EarconKind.REPLY_READY)
             if (_ui.value.voiceReplyEnabled) voiceEngine.speak(cleanText)
         }
     }
@@ -428,37 +514,73 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
     fun stopMusic() { voiceEngine.stopAmbientTone(); _ui.update { it.copy(musicActive = false, musicPlaying = false) } }
     fun setMusicVolume(v: Float) { val vol = v.coerceIn(0.05f, 0.55f); voiceEngine.setAmbientVolume(vol); _ui.update { it.copy(musicVolume = vol) } }
 
-    fun toggleVoiceListening() {
+    fun toggleVoiceListening(onFallbackToSystemVoiceDialog: (() -> Unit)? = null) {
         if (IntentEngine.evaluatePermission(_ui.value.permissions, PermissionCapability.MICROPHONE) == PermissionPolicy.DENY) {
             _ui.update { it.copy(statusBanner = "Microphone blocked in Permission Vault.") }; return
         }
-        if (_ui.value.coreState == CoreVisualState.LISTENING) {
-            voiceEngine.stopListening(); _ui.update { it.copy(coreState = CoreVisualState.IDLE, liveTranscript = "") }; return
+        if (_ui.value.isBusyOrSpeaking) {
+            stopGeneration()
+            return
         }
+        if (_ui.value.coreState == CoreVisualState.LISTENING) {
+            voiceEngine.stopListening()
+            voiceEngine.playInteractionEarcon(EarconKind.STOPPED)
+            _ui.update { it.copy(coreState = CoreVisualState.IDLE, liveTranscript = "") }
+            return
+        }
+        voiceEngine.stopSpeaking()
+        voiceEngine.playInteractionEarcon(EarconKind.LISTEN_START)
         _ui.update { it.copy(coreState = CoreVisualState.LISTENING, liveTranscript = "Listening...") }
         voiceEngine.startListening(
             onPartial = { p -> _ui.update { it.copy(liveTranscript = p) } },
             onFinal = { f -> _ui.update { it.copy(coreState = CoreVisualState.IDLE, liveTranscript = "") }; sendMessage(f) },
-            onError = { e -> _ui.update { it.copy(coreState = CoreVisualState.IDLE, liveTranscript = "", statusBanner = e) } }
+            onError = { e -> _ui.update { it.copy(coreState = CoreVisualState.IDLE, liveTranscript = "", statusBanner = e) } },
+            onFallbackToSystemVoiceDialog = {
+                _ui.update { it.copy(coreState = CoreVisualState.IDLE, liveTranscript = "") }
+                onFallbackToSystemVoiceDialog?.invoke()
+            }
         )
     }
 
-    fun toggleVoiceReply() = _ui.update { val next = !it.voiceReplyEnabled; if (!next) voiceEngine.stopSpeaking(); it.copy(voiceReplyEnabled = next) }
+    fun toggleVoiceReply() = _ui.update {
+        val next = !it.voiceReplyEnabled
+        if (!next) voiceEngine.stopSpeaking()
+        it.copy(voiceReplyEnabled = next, statusBanner = if (next) "Voice reply enabled (${it.voiceGender.label})." else "Voice reply muted.")
+    }
+
+    fun toggleInteractionSound() {
+        val next = !_ui.value.interactionSoundEnabled
+        store.saveInteractionSoundEnabled(next)
+        voiceEngine.setInteractionSoundEnabled(next)
+        if (next) voiceEngine.playInteractionEarcon(EarconKind.LISTEN_START)
+        _ui.update { it.copy(interactionSoundEnabled = next, statusBanner = if (next) "Voice interaction sound effects enabled." else "Voice interaction sound effects muted.") }
+    }
+
     fun setVoiceGender(gender: VoiceGender) {
         store.saveVoiceGender(gender.name)
         voiceEngine.setVoiceGender(gender)
         val addr = _ui.value.identity.addressAs.ifBlank { "Sir" }
         _ui.update { it.copy(voiceGender = gender, statusBanner = "Clear Natural Voice set to ${gender.label}.") }
         if (_ui.value.voiceReplyEnabled) {
-            voiceEngine.speak("Clear ${gender.label.lowercase()} voice ready, $addr.")
+            voiceEngine.speak("Hello $addr, my ${gender.label.lowercase()} voice is ready.")
         }
     }
+
     fun toggleShowAllModels() {
         val next = !_ui.value.showAllModels
         store.saveShowAllModels(next)
         _ui.update { it.copy(showAllModels = next) }
     }
-    fun toggleWebResearch() = _ui.update { val next = !it.useResearch; store.saveUseResearch(next); it.copy(useResearch = next) }
+
+    fun toggleWebResearch() = _ui.update {
+        val next = !it.useResearch
+        store.saveUseResearch(next)
+        it.copy(
+            useResearch = next,
+            statusBanner = if (next) "Real-Time Web Search ON — answers will synthesize live web facts." else "Local Offline Mode ON — 100% on-device answers."
+        )
+    }
+
     fun toggleEnsembleEnabled() = _ui.update { val next = !it.ensembleEnabled; store.saveEnsembleEnabled(next); it.copy(ensembleEnabled = next) }
 
     fun toggleInstallModel(modelId: String) =
@@ -473,13 +595,13 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
         val tag = if (!cleanRepo.contains("/")) cleanRepo else cleanRepo.substringAfterLast("/")
         val spec = OpenSourceModelSpec(
             id = "custom-${System.currentTimeMillis()}", name = cleanName, provider = "Custom Open Source",
-            params = "Custom", sizeLabel = "User Added", minRamGb = minRamGb.coerceIn(1, 32), chipsetNote = "Custom HF / Ollama",
+            params = "Custom", sizeLabel = "${minRamGb}.0 GB Download", minRamGb = minRamGb.coerceIn(1, 32), chipsetNote = "Custom HF / Ollama",
             hfRepo = if (cleanRepo.contains("/")) cleanRepo else null, ollamaTag = tag, cloudModelId = tag,
             hfInferenceModelId = if (cleanRepo.contains("/")) cleanRepo else null, summary = "Loaded dynamically ($cleanRepo).", isCustom = true
         )
         val updated = _ui.value.customModels + spec; val installed = _ui.value.installedModelIds + spec.id
         store.saveCustomModels(updated); store.saveInstalledModelIds(installed); store.saveSelectedModelId(spec.id)
-        _ui.update { it.copy(customModels = updated, installedModelIds = installed, selectedModelId = spec.id, statusBanner = "Custom model $cleanName active.") }
+        _ui.update { it.copy(customModels = updated, installedModelIds = installed, selectedModelId = spec.id, statusBanner = "Custom model $cleanName loaded.") }
     }
 
     fun toggleEnsembleMember(modelId: String) {
@@ -495,14 +617,26 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
         _ui.update { it.copy(ollamaEndpoint = cleanO, serverBaseUrl = cleanS, ollamaTestStatus = "Testing $cleanO...") }
         viewModelScope.launch {
             val tags = OpenSourceAiRepository.testLocalEndpoint(cleanO)
-            val msg = if (tags.isNotEmpty()) "Connected! Models: ${tags.take(6).joinToString(", ")}" else "No Ollama responding at $cleanO."
+            val msg = if (tags.isNotEmpty()) "Connected! Models: ${tags.take(6).joinToString(", ")}" else "No external Ollama needed — Built-in Local Hardware Engine is active."
             _ui.update { it.copy(ollamaTestStatus = msg) }
         }
     }
 
     fun updateIdentity(fullName: String, addressAs: String) {
         val updated = UserIdentityProfile(fullName.trim().ifEmpty { "Md Shabbir Mia" }, addressAs.trim().ifEmpty { "Sir" })
-        store.saveIdentity(updated); _ui.update { it.copy(identity = updated) }
+        store.saveIdentity(updated)
+        _ui.update { state ->
+            val updatedMessages = state.messages.map { m ->
+                if (m.id.startsWith("welcome-")) {
+                    m.copy(text = "Good to see you, ${updated.addressAs}. How can I help today?")
+                } else m
+            }
+            state.copy(
+                identity = updated,
+                messages = updatedMessages,
+                statusBanner = "Profile saved for ${updated.fullName} (addressed as ${updated.addressAs})."
+            )
+        }
     }
 
     fun setPermissionPolicy(cap: PermissionCapability, policy: PermissionPolicy) {

@@ -23,7 +23,7 @@ data class ShamiaUiState(
     val chatSessionId: String = "session-initial",
     val identity: UserIdentityProfile = UserIdentityProfile(),
     val hardware: DeviceHardwareSpec = DeviceHardwareSpec(
-        ramGb = 4,
+        ramGb = 6,
         cpuCores = 8,
         deviceLabel = "Android Device"
     ),
@@ -32,17 +32,19 @@ data class ShamiaUiState(
     val clockLabel: String = "",
     val messages: List<HudMessage> = emptyList(),
     val coreState: CoreVisualState = CoreVisualState.IDLE,
+    val isGenerating: Boolean = false,
     val liveTranscript: String = "",
     val voiceReplyEnabled: Boolean = true,
+    val interactionSoundEnabled: Boolean = true,
     val voiceGender: VoiceGender = VoiceGender.FEMALE,
     val showAllModels: Boolean = false,
-    val useResearch: Boolean = true,
-    val selectedModelId: String = "gemma-4-free",
-    val recommendedModelId: String = "offline-core",
+    val useResearch: Boolean = false,
+    val selectedModelId: String = "gemma-3-free",
+    val recommendedModelId: String = "gemma-3-free",
     val ensembleEnabled: Boolean = false,
-    val ensembleModelIds: List<String> = listOf("gemma-4-free", "qwen3-8b-chinese", "gpt-oss-20b-free"),
+    val ensembleModelIds: List<String> = listOf("gemma-3-free", "llama-32-free", "qwen25-1.5b-edge"),
     val customModels: List<OpenSourceModelSpec> = emptyList(),
-    val installedModelIds: Set<String> = setOf("offline-core"),
+    val installedModelIds: Set<String> = setOf("offline-core", "gemma-3-free", "llama-32-free"),
     val modelDownloadProgress: Map<String, Pair<Int, String>> = emptyMap(),
     val installedVoiceIds: Set<String> = emptySet(),
     val voiceDownloadProgress: Map<String, Pair<Int, String>> = emptyMap(),
@@ -67,7 +69,7 @@ data class ShamiaUiState(
         get() = ModelCatalog.CATALOG + customModels
 
     fun isModelSafeForDevice(spec: OpenSourceModelSpec): Boolean =
-        ModelDownloadManager.isSafeForLocalInstall(spec, hardware) || spec.sizeLabel.contains("Cloud", ignoreCase = true)
+        ModelDownloadManager.isSafeForLocalInstall(spec, hardware)
 
     val compatibleModels: List<OpenSourceModelSpec>
         get() = allModels.filter { isModelSafeForDevice(it) }
@@ -77,6 +79,9 @@ data class ShamiaUiState(
 
     val selectedModel: OpenSourceModelSpec
         get() = allModels.find { it.id == selectedModelId } ?: ModelCatalog.CATALOG.first()
+
+    val isBusyOrSpeaking: Boolean
+        get() = isGenerating || coreState == CoreVisualState.THINKING || coreState == CoreVisualState.SPEAKING
 
     val activeTrackId: String?
         get() = if (musicActive && musicPlaying) ModelCatalog.AMBIENT_TRACKS.getOrNull(activeTrackIndex)?.id else null

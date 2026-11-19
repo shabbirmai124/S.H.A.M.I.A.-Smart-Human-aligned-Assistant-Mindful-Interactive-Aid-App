@@ -23,72 +23,54 @@ object ShamiaPrompts {
         val addressAs = identity.addressAs.trim().ifEmpty { "Sir" }
         val fullName = identity.fullName.trim().ifEmpty { "Md Shabbir Mia" }
 
-        val permissionSummary = PermissionCapability.entries.joinToString(", ") { cap ->
-            val policy = (permissions[cap] ?: PermissionPolicy.ASK).name.lowercase()
-            "${cap.name.lowercase()}=$policy"
-        }
-
         val activeTasksText = if (tasksSummary.isNotEmpty()) {
-            tasksSummary.take(5).joinToString("; ")
+            tasksSummary.take(4).joinToString("; ")
         } else {
             "No pending tasks."
         }
         val activeRoutineText = if (routineSummary.isNotEmpty()) {
-            routineSummary.take(6).joinToString("; ")
+            routineSummary.take(4).joinToString("; ")
         } else {
             "No routine blocks scheduled."
         }
         val activeSyllabusText = if (syllabusSummary.isNotEmpty()) {
-            syllabusSummary.take(6).joinToString("; ")
+            syllabusSummary.take(4).joinToString("; ")
         } else {
             "No syllabus topics active."
         }
 
-        val modelDirective = if (activeModel != null) {
-            val backendTag = resolvedBackendId ?: activeModel.ollamaTag ?: activeModel.cloudModelId
-            val styleNote = if (activeModel.styleProfile.isNotBlank()) {
-                "MODEL RESPONSE STYLE: ${activeModel.styleProfile}"
-            } else {
-                ""
-            }
-            listOf(
-                "System Instruction: Do not use the default fallback model or cached responses for this request. Process and generate the answer strictly using the currently selected active model (${activeModel.name} | ID: ${activeModel.id} | Backend: $backendTag).",
-                "At the very beginning of your response, explicitly state the exact model ID/version you are running on right now ([Model: ${activeModel.name} ($backendTag)]) before answering.",
-                styleNote
-            ).filter { it.isNotEmpty() }.joinToString("\n")
+        val modelPersona = if (activeModel != null) {
+            "You are currently powered by ${activeModel.name} (${activeModel.params}). Style: ${activeModel.styleProfile}"
         } else {
             ""
         }
 
         val corePersona = listOf(
-            "You are S.H.A.M.I.A. (Smart Human-aligned Assistant & Mindful Interactive Aid), created exclusively by and for $fullName.",
-            modelDirective,
-            "CRITICAL ADDRESS RULE: Always address the user strictly and respectfully as \"$addressAs\" in every greeting, confirmation, and response. Never replace \"$addressAs\" unless the user updates their preference.",
-            "TONE & PERSONALITY: Warm, human-like, articulate, calm, and dependable.",
-            "Current Permission Vault: [$permissionSummary].",
-            "PERMISSION GOVERNANCE: Never claim you executed a sensitive device action without user authorization. If a capability is \"deny\", respectfully inform $addressAs that permission is denied.",
-            "Active Priorities for $addressAs: $activeTasksText",
-            "Daily Routine: $activeRoutineText",
-            "University Syllabus Focus: $activeSyllabusText"
+            "You are S.H.A.M.I.A. (Smart Human-aligned Assistant & Mindful Interactive Aid), a warm, intelligent, personal AI voice companion created exclusively by and for $fullName.",
+            modelPersona,
+            "ADDRESS RULE: Address the user naturally and respectfully as \"$addressAs\".",
+            "HUMAN CONVERSATION & SEARCH SYNTHESIS RULE: Always answer in a clear, constructive, natural human tone like an articulate personal assistant. NEVER output bracketed debug headers like [Model: ...], NEVER dump raw pipe-separated search snippets or HTML entities like &quot; or &#039;, and NEVER tell the user to run terminal commands like 'ollama pull'.",
+            "When [Verified Web Search Context] is provided with the user's message, synthesize those facts into a cohesive, accurate, well-structured explanation that directly answers the user's question in your own clear words.",
+            "User Context — Priorities: $activeTasksText | Daily Routine: $activeRoutineText | University Syllabus: $activeSyllabusText"
         ).filter { it.isNotEmpty() }.joinToString("\n")
 
         return when (detectedIntent) {
             ConversationalIntent.ENGLISH_TUTOR -> listOf(
                 corePersona,
-                "CONTEXT DETECTED: $addressAs wants to practice or refine spoken/written English.",
-                "Respond naturally like an encouraging human speaking partner (2-3 crisp sentences) and end with a follow-up question.",
-                "If helpful, include [ENG_TIP: natural phrase | short tip]."
+                "CONTEXT: $addressAs wants to practice spoken or written English.",
+                "Respond warmly like an encouraging human speaking partner (2-3 natural sentences) and end with a follow-up question.",
+                "If helpful, append [ENG_TIP: natural phrase | short tip] at the very end."
             ).joinToString("\n\n")
 
             ConversationalIntent.MENTAL_SUPPORT -> listOf(
                 corePersona,
-                "CONTEXT DETECTED: $addressAs may be carrying stress, fatigue, or heavy emotions.",
-                "Be genuinely present, gentle, steady, and supportive in 2-4 warm sentences without clinical jargon."
+                "CONTEXT: $addressAs may be feeling stressed, overwhelmed, or tired.",
+                "Be genuinely empathetic, calm, reassuring, and supportive in 2-4 natural human sentences."
             ).joinToString("\n\n")
 
             else -> listOf(
                 corePersona,
-                "Keep answers clear, accurate, and tailored to ${activeModel?.name ?: "the active model"}."
+                "Give a direct, accurate, constructive, and easy-to-follow answer."
             ).joinToString("\n\n")
         }
     }
