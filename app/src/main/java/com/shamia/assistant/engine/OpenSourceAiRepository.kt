@@ -178,7 +178,7 @@ object OpenSourceAiRepository {
     ): BackendOutput? = withContext(Dispatchers.IO) {
         val candidates = CloudModelResolver.resolveCloudCandidates(modelSpec)
         val finalPrompt = if (webContext.isNotBlank()) {
-            "$prompt\n\n[Verified Web Search Context — synthesize into a clear, constructive human answer]:\n$webContext"
+            "$prompt\n\n[Verified Web Search Context — synthesize into a clear, detailed, constructive human answer without mentioning your model name]:\n$webContext"
         } else prompt
         val seed = abs((System.currentTimeMillis() xor modelSpec.id.hashCode().toLong()).toInt())
 
@@ -194,13 +194,14 @@ object OpenSourceAiRepository {
             put(JSONObject().put("role", "user").put("content", finalPrompt))
         }
 
+        // 1. Try OpenAI-compatible POST endpoint across resolved model candidates
         for (targetModel in candidates) {
             val hit = runCatching {
                 val conn = (URL("https://text.pollinations.ai/openai").openConnection() as HttpURLConnection).apply {
                     requestMethod = "POST"
                     doOutput = true
-                    connectTimeout = 4000
-                    readTimeout = 11000
+                    connectTimeout = 5000
+                    readTimeout = 14000
                     setRequestProperty("Content-Type", "application/json")
                     setRequestProperty("User-Agent", USER_AGENT)
                     setRequestProperty("Cache-Control", "no-cache, no-store, max-age=0")
@@ -215,7 +216,8 @@ object OpenSourceAiRepository {
                     val raw = conn.inputStream.bufferedReader().use { it.readText().trim() }
                     val content = if (raw.startsWith("{")) {
                         val json = JSONObject(raw)
-                        json.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message")?.optString("content")?.trim().orEmpty()
+                        json.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message")?.optString("content")?.trim()
+                            ?: json.optString("content").trim()
                     } else raw
                     if (content.isNotEmpty() && !content.startsWith("<!DOCTYPE", ignoreCase = true)) {
                         BackendOutput(content, modelSpec.ollamaTag ?: modelSpec.id, "${modelSpec.name} Engine")
@@ -227,43 +229,45 @@ object OpenSourceAiRepository {
             if (hit != null) return@withContext hit
         }
 
-        // Compact GET fallback with short URL and proper User-Agent
-        val primaryModel = candidates.firstOrNull() ?: "openai"
-        runCatching {
-            val compactQ = URLEncoder.encode(finalPrompt.take(550), "UTF-8")
-            val compactSys = URLEncoder.encode(
-                "You are S.H.A.M.I.A. (${modelSpec.name}). Give a clear, constructive, natural human answer without bracketed debug tags.",
-                "UTF-8"
-            )
-            val url = URL("https://text.pollinations.ai/$compactQ?model=$primaryModel&system=$compactSys&seed=$seed")
-            val conn = (url.openConnection() as HttpURLConnection).apply {
-                connectTimeout = 3500
-                readTimeout = 9000
-                setRequestProperty("User-Agent", USER_AGENT)
-                setRequestProperty("Cache-Control", "no-cache")
-            }
-            val out = if (conn.responseCode in 200..299) {
-                val text = conn.inputStream.bufferedReader().use { it.readText().trim() }
-                if (text.isNotEmpty() && !text.startsWith("{") && !text.startsWith("<!DOCTYPE", ignoreCase = true)) {
-                    BackendOutput(text, modelSpec.ollamaTag ?: modelSpec.id, "${modelSpec.name} Engine")
+        // 2. Compact GET fallback with short URL and proper User-Agent
+        for (fallbackModel in listOf(candidates.firstOrNull() ?: "openai", "openai")) {
+            val getHit = runCatching {
+                val compactQ = URLEncoder.encode(finalPrompt.take(700), "UTF-8")
+                val compactSys = URLEncoder.encode(
+                    "You are S.H.A.M.I.A., a helpful personal AI assistant. Give a detailed, accurate, constructive answer. Do not mention which AI model you are unless explicitly asked.",
+                    "UTF-8"
+                )
+                val url = URL("https://text.pollinations.ai/$compactQ?model=$fallbackModel&system=$compactSys&seed=$seed")
+                val conn = (url.openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 4500
+                    readTimeout = 12000
+                    setRequestProperty("User-Agent", USER_AGENT)
+                    setRequestProperty("Cache-Control", "no-cache")
+                }
+                val out = if (conn.responseCode in 200..299) {
+                    val text = conn.inputStream.bufferedReader().use { it.readText().trim() }
+                    if (text.isNotEmpty() && !text.startsWith("{") && !text.startsWith("<!DOCTYPE", ignoreCase = true)) {
+                        BackendOutput(text, modelSpec.ollamaTag ?: modelSpec.id, "${modelSpec.name} Engine")
+                    } else null
                 } else null
-            } else null
-            conn.disconnect()
-            out
-        }.getOrNull()
+                conn.disconnect()
+                out
+            }.getOrNull()
+            if (getHit != null) return@withContext getHit
+        }
+        null
     }
 
     fun isModelCachedOnDevice(context: Context?, modelId: String): Boolean {
         if (modelId == "offline-core") return true
         val ctx = context ?: return false
-        val dir = java.io.File(ctx.filesDir, "models/$modelId")
-        return dir.exists() && (java.io.File(dir, "config.json").exists() || java.io.File(dir, "model_descriptor.json").exists())
+        return OnDeviceLlmEngine.hasRealLocalWeights(ctx, modelId)
     }
 
     private fun isLowQualityOrBrokenReply(text: String): Boolean {
         val t = text.trim()
-        if (t.length < 12) return true
-        val lower = t.lowercase( java.util.Locale.US)
+        if (t.length < 4) return true
+        val lower = t.lowercase(java.util.Locale.US)
         return lower.startsWith("<!doctype") ||
             lower.startsWith("<html") ||
             lower.contains("rate limit") ||
@@ -275,6 +279,7 @@ object OpenSourceAiRepository {
     }
 
     suspend fun dispatchStrictModelRequest(
+        context: Context? = null,
         prompt: String,
         activeSpec: OpenSourceModelSpec,
         identity: UserIdentityProfile,
@@ -288,24 +293,31 @@ object OpenSourceAiRepository {
         serverBaseUrl: String,
         useResearch: Boolean,
         isOnline: Boolean = true,
-        isInstalledLocally: Boolean = true
+        isInstalledLocally: Boolean = false,
+        onStreamToken: ((String) -> Unit)? = null
     ): ModelDispatchResult {
         val addr = identity.addressAs.trim().ifEmpty { "Sir" }
         val routineSummary = routine.filter { !it.completed }.map { "${it.timeLabel}: ${it.title}" }
         val syllabusSummary = syllabus.filter { !it.completed }.map { "${it.courseCode} ${it.courseTitle}: ${it.topic}" }
         val resolvedBackendId = activeSpec.ollamaTag ?: activeSpec.id
+        val hasRealWeights = context != null && OnDeviceLlmEngine.hasRealLocalWeights(context, activeSpec.id)
 
-        Log.i(TAG, "DISPATCH | selectedId=${activeSpec.id} | model=${activeSpec.name} | installed=$isInstalledLocally | online=$isOnline | search=$useResearch")
+        Log.i(TAG, "DISPATCH | selectedId=${activeSpec.id} | model=${activeSpec.name} | hasWeights=$hasRealWeights | online=$isOnline | search=$useResearch")
 
+        // Only reveal which model is running when the user explicitly asks
         if (CloudModelResolver.isModelIntrospectionQuery(prompt)) {
-            val storageState = if (isInstalledLocally || activeSpec.isBuiltInOffline) "Loaded in Local Phone Storage" else "Active on Device"
-            val reply = "I am currently running on **${activeSpec.name}** (`${activeSpec.id}` · ${activeSpec.params} · ${activeSpec.sizeLabel} · $storageState), $addr, configured for ${identity.fullName}."
+            val storageState = when {
+                hasRealWeights -> "Loaded on Phone (${OnDeviceLlmEngine.installedWeightsSizeMb(context!!, activeSpec.id)} MB local weights)"
+                activeSpec.isBuiltInOffline -> "Built-In Local Engine"
+                else -> "Selected (weights not yet downloaded — tap Download in Models tab)"
+            }
+            val reply = "You are currently using **${activeSpec.name}** (${activeSpec.params} · ${activeSpec.sizeLabel} · $storageState), $addr."
             return ModelDispatchResult(
                 replyText = reply,
                 source = MessageSource.OFFLINE_CORE,
                 modelLabel = activeSpec.name,
                 groundingLinks = emptyList(),
-                executionMeta = ModelExecutionMeta(activeSpec.id, activeSpec.name, resolvedBackendId, "Local Hardware Engine (${activeSpec.sizeLabel})", true)
+                executionMeta = ModelExecutionMeta(activeSpec.id, activeSpec.name, resolvedBackendId, storageState, true)
             )
         }
 
@@ -326,7 +338,35 @@ object OpenSourceAiRepository {
             "" to emptyList()
         }
 
-        // 1. Try local on-device Termux Ollama if running
+        // PRIORITY 1: Real On-Device Local Neural Engine (MediaPipe LiteRT .task weights on phone CPU/GPU — 100% offline!)
+        if (context != null && hasRealWeights) {
+            OnDeviceLlmEngine.generateOfflineStream(
+                context = context,
+                spec = activeSpec,
+                systemInstruction = systemInstruction,
+                history = sameModelHistory,
+                userPrompt = prompt,
+                webContext = webSummary,
+                onPartialResponse = { partial ->
+                    onStreamToken?.invoke(
+                        CloudModelResolver.sanitizeReplyForActiveModel(partial, activeSpec, identity, resolvedBackendId)
+                    )
+                }
+            )?.let { (rawText, backendLabel) ->
+                if (!isLowQualityOrBrokenReply(rawText)) {
+                    val cleanReply = CloudModelResolver.sanitizeReplyForActiveModel(rawText, activeSpec, identity, resolvedBackendId)
+                    return ModelDispatchResult(
+                        replyText = cleanReply,
+                        source = if (links.isNotEmpty()) MessageSource.CLOUD_RESEARCH else MessageSource.OFFLINE_CORE,
+                        modelLabel = activeSpec.name,
+                        groundingLinks = links,
+                        executionMeta = ModelExecutionMeta(activeSpec.id, activeSpec.name, resolvedBackendId, backendLabel, true)
+                    )
+                }
+            }
+        }
+
+        // PRIORITY 2: Local On-Device Termux / LAN Ollama if running
         val targetTag = activeSpec.ollamaTag ?: activeSpec.id
         queryLocalOllamaStrict(ollamaEndpoint, targetTag, prompt, systemInstruction, sameModelHistory, webSummary)?.let { out ->
             if (!isLowQualityOrBrokenReply(out.text)) {
@@ -341,7 +381,7 @@ object OpenSourceAiRepository {
             }
         }
 
-        // 2. If online and not strictly offline-core, try Open-Weights inference with clean search synthesis
+        // PRIORITY 3: If local weights aren't downloaded yet & user is online, try free open-weight inference
         if (isOnline && !activeSpec.isBuiltInOffline) {
             queryOpenWeightsInference(activeSpec, prompt, systemInstruction, sameModelHistory, webSummary)?.let { out ->
                 if (!isLowQualityOrBrokenReply(out.text)) {
@@ -357,7 +397,18 @@ object OpenSourceAiRepository {
             }
         }
 
-        // 3. Constructive On-Device Local Hardware Inference (works 100% offline for every single open-source model!)
+        // PRIORITY 4: Built-in On-Device Companion (Math, English Coach, Breathing, Routine/Syllabus, Coding, Knowledge & Clean Web Synthesis)
+        // If user is online and didn't turn on web search, still try quick Wikipedia/DDG fact lookup for real factual questions instead of failing
+        var effectiveWebSummary = webSummary
+        var effectiveLinks = links
+        if (effectiveWebSummary.isBlank() && isOnline && prompt.trim().length >= 4) {
+            val (autoWeb, autoLinks) = searchGoogleAndOpenWeb(prompt)
+            if (autoWeb.isNotBlank()) {
+                effectiveWebSummary = autoWeb
+                effectiveLinks = autoLinks
+            }
+        }
+
         val localReply = OfflineCompanion.generateReply(
             input = prompt,
             addressAs = addr,
@@ -365,7 +416,7 @@ object OpenSourceAiRepository {
             routine = routine,
             syllabus = syllabus,
             selectedModel = activeSpec,
-            webContext = webSummary,
+            webContext = effectiveWebSummary,
             history = sameModelHistory
         )
         val tipSuffix = localReply.coachingTip?.let {
@@ -378,22 +429,16 @@ object OpenSourceAiRepository {
             executedBackendId = resolvedBackendId
         )
 
-        val engineDescriptor = if (isInstalledLocally || activeSpec.isBuiltInOffline) {
-            "On-Device Local Hardware (${activeSpec.name} · ${activeSpec.sizeLabel})"
-        } else {
-            "Local Hardware Engine (${activeSpec.sizeLabel})"
-        }
-
         return ModelDispatchResult(
             replyText = cleanText,
-            source = if (links.isNotEmpty()) MessageSource.CLOUD_RESEARCH else MessageSource.OFFLINE_CORE,
+            source = if (effectiveLinks.isNotEmpty()) MessageSource.CLOUD_RESEARCH else MessageSource.OFFLINE_CORE,
             modelLabel = activeSpec.name,
-            groundingLinks = links,
+            groundingLinks = effectiveLinks,
             executionMeta = ModelExecutionMeta(
                 requestedModelId = activeSpec.id,
                 requestedModelName = activeSpec.name,
                 executedModelId = resolvedBackendId,
-                providerEngine = engineDescriptor,
+                providerEngine = if (hasRealWeights) "On-Device LiteRT" else "Built-In Local Engine",
                 cacheBypassed = true
             )
         )

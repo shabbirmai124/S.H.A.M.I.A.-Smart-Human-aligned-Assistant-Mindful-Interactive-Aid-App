@@ -24,10 +24,11 @@ internal object ShamiaStateDelegates {
         val state = ui.value
         val spec = state.allModels.find { it.id == modelId } ?: return
         if (state.installedModelIds.contains(modelId) && !spec.isBuiltInOffline) {
+            scope.launch { OnDeviceLlmEngine.release() }
             ModelDownloadManager.removeOfflineCache(app, modelId)
             val next = state.installedModelIds - modelId
             store.saveInstalledModelIds(next)
-            ui.update { it.copy(installedModelIds = next, statusBanner = "Removed offline cache for ${spec.name}.") }
+            ui.update { it.copy(installedModelIds = next, statusBanner = "Removed local weights for ${spec.name}.") }
             return
         }
         if (!ModelDownloadManager.isSafeForLocalInstall(spec, state.hardware)) {
@@ -38,7 +39,7 @@ internal object ShamiaStateDelegates {
         }
         if (state.modelDownloadProgress.containsKey(modelId)) return
         scope.launch {
-            val ok = ModelDownloadManager.installModelOffline(app, spec, ui.value.ollamaEndpoint) { pct, statusText ->
+            val (ok, detailMessage) = ModelDownloadManager.installModelOffline(app, spec, ui.value.ollamaEndpoint) { pct, statusText ->
                 ui.update { cur -> cur.copy(modelDownloadProgress = cur.modelDownloadProgress + (modelId to (pct to statusText))) }
             }
             ui.update { cur ->
@@ -51,7 +52,7 @@ internal object ShamiaStateDelegates {
                     installedModelIds = nextIds,
                     selectedModelId = if (ok) spec.id else cur.selectedModelId,
                     modelDownloadProgress = cur.modelDownloadProgress - modelId,
-                    statusBanner = if (ok) "${spec.name} (${spec.sizeLabel}) downloaded & active on phone." else "Offline install cancelled."
+                    statusBanner = detailMessage
                 )
             }
         }

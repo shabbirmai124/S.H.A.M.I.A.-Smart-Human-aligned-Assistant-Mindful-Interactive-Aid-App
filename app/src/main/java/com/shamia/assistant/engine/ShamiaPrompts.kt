@@ -39,17 +39,18 @@ object ShamiaPrompts {
             "No syllabus topics active."
         }
 
-        val modelPersona = if (activeModel != null) {
-            "You are currently powered by ${activeModel.name} (${activeModel.params}). Style: ${activeModel.styleProfile}"
+        val modelStyleHint = if (activeModel != null && activeModel.styleProfile.isNotBlank()) {
+            "Reasoning style: ${activeModel.styleProfile}"
         } else {
             ""
         }
 
         val corePersona = listOf(
             "You are S.H.A.M.I.A. (Smart Human-aligned Assistant & Mindful Interactive Aid), a warm, intelligent, personal AI voice companion created exclusively by and for $fullName.",
-            modelPersona,
+            modelStyleHint,
             "ADDRESS RULE: Address the user naturally and respectfully as \"$addressAs\".",
-            "HUMAN CONVERSATION & SEARCH SYNTHESIS RULE: Always answer in a clear, constructive, natural human tone like an articulate personal assistant. NEVER output bracketed debug headers like [Model: ...], NEVER dump raw pipe-separated search snippets or HTML entities like &quot; or &#039;, and NEVER tell the user to run terminal commands like 'ollama pull'.",
+            "MODEL SILENCE RULE: NEVER mention which AI model, architecture, or download size you are using in normal responses. ONLY state your active model name (${activeModel?.name ?: "S.H.A.M.I.A."}) if the user explicitly asks which model they are using.",
+            "HUMAN CONVERSATION & SEARCH SYNTHESIS RULE: Always answer in a clear, detailed, constructive, natural human tone like an articulate personal assistant. NEVER output bracketed debug headers like [Model: ...], NEVER dump raw pipe-separated search snippets or HTML entities like &quot; or &#039;, and NEVER tell the user to run terminal commands like 'ollama pull'.",
             "When [Verified Web Search Context] is provided with the user's message, synthesize those facts into a cohesive, accurate, well-structured explanation that directly answers the user's question in your own clear words.",
             "User Context — Priorities: $activeTasksText | Daily Routine: $activeRoutineText | University Syllabus: $activeSyllabusText"
         ).filter { it.isNotEmpty() }.joinToString("\n")

@@ -484,24 +484,22 @@ object OfflineCompanion {
             "$owner"
     }
 
-    private fun modelSignatureFocus(selectedModel: OpenSourceModelSpec?): String {
-        val id = selectedModel?.id.orEmpty()
-        return when {
-            id.contains("gemma") -> "Google Gemma open-weight architecture (instruction-tuned for structured clarity and factual synthesis)"
-            id.contains("llama-32-3b") -> "Meta Llama 3.2 3B Instruct architecture (optimized for multi-step mobile reasoning and summarization)"
-            id.contains("llama") -> "Meta Llama 3.2 1B Instruct architecture (optimized for low-latency mobile dialogue)"
-            id.contains("qwen3-8b") -> "Alibaba Qwen 3 8B hybrid-thinking architecture (deep analytical reasoning and coding precision)"
-            id.contains("qwen3-4b") -> "Alibaba Qwen 3 4B mobile-efficiency architecture (balanced reasoning, math, and coding on 4nm/6nm phones)"
-            id.contains("qwen25-1.5b") -> "Alibaba Qwen 2.5 1.5B Instruct architecture (compact coding, math, and multilingual efficiency)"
-            id.contains("qwen25-0.5b") -> "Alibaba Qwen 2.5 0.5B ultra-light architecture (fast, battery-friendly local inference)"
-            id.contains("phi") -> "Microsoft Phi-3.5 Mini 3.8B architecture (dense textbook-grade STEM and logical deduction)"
-            id.contains("smollm2-1.7b") -> "HuggingFace SmolLM2 1.7B Instruct architecture (on-device writing, summarization, and everyday Q&A)"
-            id.contains("smollm2-360m") -> "HuggingFace SmolLM2 360M ultra-compact architecture (instant edge response on 2GB+ phones)"
-            id.contains("minicpm") -> "OpenBMB MiniCPM-o 2.6 8B multimodal architecture (high-density visual and conversational reasoning)"
-            id.contains("glm") -> "THUDM GLM-4 9B Chat architecture (long-context structured synthesis)"
-            id.contains("gpt-oss") -> "OpenAI GPT-OSS 20B open-weight architecture (high-capacity reasoning and code synthesis)"
-            else -> "S.H.A.M.I.A. built-in on-device neural companion core"
+    private fun isLikelyKeyboardSmashOrTypo(text: String): Boolean {
+        val clean = text.trim()
+        if (clean.isEmpty()) return true
+        // Repeated same character 3+ times in a row (e.g. "rerdddd", "aaaaa", "asdfgh")
+        if (Regex("(.)\\1{2,}", RegexOption.IGNORE_CASE).containsMatchIn(clean) && !clean.contains(" ")) {
+            return true
         }
+        val lettersOnly = clean.filter { it.isLetter() }.lowercase(Locale.US)
+        if (lettersOnly.length in 3..14 && !clean.contains(" ")) {
+            val vowels = lettersOnly.count { it in "aeiouy" }
+            if (vowels == 0) return true
+            if (Regex("^(asdf|qwer|zxcv|hjkl|rerdd|dfgh|cvbn|tyui)", RegexOption.IGNORE_CASE).containsMatchIn(lettersOnly)) {
+                return true
+            }
+        }
+        return false
     }
 
     private fun buildConstructiveGeneralAnswer(
@@ -514,80 +512,84 @@ object OfflineCompanion {
         val lower = clean.lowercase(Locale.US)
         val words = clean.split(Regex("\\s+")).filter { it.isNotBlank() }
 
-        // 1. Direct encyclopedic & technical knowledge base for common offline questions
+        // 1. Direct encyclopedic & technical knowledge base for offline questions
         lookupBuiltInKnowledge(lower, addr)?.let { return it }
 
-        // 2. If the user pasted a paragraph or statement to analyze/explain
-        if (words.size >= 18 && !clean.endsWith("?")) {
+        // 2. Detect random test typing / keyboard smash (like "rerdddd" or "asdf")
+        if (isLikelyKeyboardSmashOrTypo(clean)) {
+            return "It looks like \"$clean\" might have been a quick test or typo, $addr. Tell me what question, coding task, or topic you'd like help with!"
+        }
+
+        // 3. If the user pasted a multi-sentence paragraph to summarize
+        if (words.size >= 16 && !clean.endsWith("?")) {
             val sentences = clean.split(Regex("(?<=[.!?])\\s+")).map { it.trim() }.filter { it.isNotEmpty() }
             val firstSentence = sentences.firstOrNull().orEmpty()
             val secondPoint = sentences.getOrNull(1)
-                ?: "The passage emphasizes how context and structure shape accurate interpretation."
-            return "Here is a clear, constructive analysis of that passage, $addr:\n\n" +
-                "• **Main Idea:** $firstSentence\n" +
-                "• **Supporting Detail:** $secondPoint\n" +
-                "• **Key Takeaway:** Focusing on the core subject and cause-and-effect relationship makes the passage easy to retain and explain in your own words."
+            return buildString {
+                append("Here is a concise summary of the passage you shared, $addr:\n\n")
+                append("• **Main Point:** $firstSentence")
+                if (!secondPoint.isNullOrBlank()) {
+                    append("\n• **Supporting Detail:** $secondPoint")
+                }
+                append("\n\nWould you like me to simplify the wording or pull out key study notes from this?")
+            }
         }
 
-        // 3. Question classification ("how to", "difference between", "why", "what is")
-        val subject = WebSearchClient.cleanSearchQuery(clean).ifEmpty { clean }
-        val archNote = modelSignatureFocus(selectedModel)
-
-        if (lower.contains("difference between") || lower.contains(" vs ") || lower.contains(" versus ")) {
-            return "Here is a structured comparison of **$subject**, $addr:\n\n" +
-                "1. **Core Purpose & Design:** Each option targets a distinct trade-off between speed, resource usage, and flexibility.\n" +
-                "2. **When to Choose Each:** Pick the lighter, simpler approach when latency, battery life, or fast iteration matters most; choose the fuller-featured option when scalability or deep customization is required.\n" +
-                "3. **Practical Recommendation:** Test both against your real workload constraints before committing.\n\n" +
-                "*(Evaluated locally by **$modelName** — $archNote)*"
-        }
-
-        if (lower.startsWith("how to ") || lower.startsWith("how do i ") || lower.startsWith("how can i ")) {
-            return "Here is a clear, step-by-step guide on **$subject**, $addr:\n\n" +
-                "1. **Prepare the Foundation:** Define the exact goal and gather the required inputs or tools first.\n" +
-                "2. **Execute Incrementally:** Break the task into small, testable milestones so you can verify progress after each step.\n" +
-                "3. **Review & Refine:** Validate the result against edge cases and simplify any unnecessary complexity.\n\n" +
-                "Tell me which step you'd like to focus on first, and **$modelName** will walk you through it in detail."
-        }
-
-        return "Here is a clear, constructive overview of **$subject**, $addr:\n\n" +
-            "• **Core Concept:** **$subject** centers on organizing key principles, inputs, and outcomes so they work together reliably.\n" +
-            "• **How It Works in Practice:** Start from the fundamental definition, apply it to a concrete real-world example, and verify the result step by step.\n" +
-            "• **Active Local Model:** Generated by **$modelName** (${selectedModel?.sizeLabel ?: "On-Device"} · $archNote).\n\n" +
-            "If you want live web facts on **$subject**, tap the **Globe (🌐)** button in the chat bar, or ask me a specific follow-up question!"
+        // 4. Honest, helpful guidance when local neural weights (.task) haven't been downloaded yet
+        val sizeHint = selectedModel?.sizeLabel ?: "0.5 GB Download"
+        return "To answer open-ended questions like \"$clean\" completely offline on your phone, $addr, download the local model weights once in the **Models** tab (for fast setup, **SmolLM 135M · 0.2 GB** or **Qwen 2.5 0.5B · 0.5 GB**, or your selected **$sizeHint** model).\n\n" +
+            "You can also tap the **Globe (🌐)** button in the chat bar for live web answers right now, or ask me to solve math, write code, practice English, or plan your study routine offline."
     }
 
     private fun lookupBuiltInKnowledge(lower: String, addr: String): String? {
         return when {
             lower.contains("quantum computing") || lower.contains("qubit") ->
-                "**Quantum Computing** uses quantum-mechanical phenomena—**superposition** and **entanglement**—to perform computations, $addr:\n\n" +
-                    "• **Classical Bit vs. Qubit:** A classical bit is strictly `0` or `1`, whereas a **qubit** can exist in a linear superposition of both `0` and `1` simultaneously until measured.\n" +
-                    "• **Key Advantage:** Algorithms like **Shor's** (factoring) and **Grover's** (search) achieve exponential or quadratic speedups on problems that would take classical supercomputers centuries."
+                "**Quantum Computing** harnesses quantum-mechanical phenomena—**superposition**, **entanglement**, and **quantum interference**—to perform computations, $addr:\n\n" +
+                    "• **Classical Bit vs. Qubit:** A classical bit is strictly `0` or `1`, whereas a **qubit** can exist in a coherent superposition of both `0` and `1` simultaneously until measured.\n" +
+                    "• **Entanglement & Speedup:** Entangled qubits correlate their states instantaneously, allowing algorithms like **Shor's** (prime factorization) and **Grover's** (unstructured search) to solve problems exponentially or quadratically faster than classical computers."
 
-            lower.contains("machine learning") || lower.contains("deep learning") || lower.contains("neural network") || lower.contains("llm") || lower.contains("transformer") ->
-                "Here is how **Modern AI, Deep Learning, and LLMs** work, $addr:\n\n" +
-                    "1. **Machine Learning (ML):** Algorithms learn patterns directly from data rather than hardcoded rules (Supervised, Unsupervised, and Reinforcement Learning).\n" +
-                    "2. **Neural Networks & Transformers:** Multi-layer architectures using **Self-Attention** weigh how every token in a sentence relates to every other token.\n" +
-                    "3. **On-Device Quantization (Q4/GGUF):** By compressing 16-bit weights down to 4-bit integers, open-weight models like **Gemma 3**, **Llama 3.2**, and **Qwen 3** fit directly inside your phone's RAM."
+            lower.contains("machine learning") || lower.contains("deep learning") || lower.contains("neural network") || lower.contains("artificial intelligence") || lower.contains("llm") || lower.contains("transformer") ->
+                "Here is a detailed breakdown of **Artificial Intelligence, Deep Learning, and Large Language Models (LLMs)**, $addr:\n\n" +
+                    "1. **Machine Learning (ML):** Systems learn statistical patterns directly from data rather than explicit if/else rules, divided into **Supervised Learning**, **Unsupervised Learning**, and **Reinforcement Learning**.\n" +
+                    "2. **Deep Neural Networks & Transformers:** Modern language models use the **Transformer** architecture with **Multi-Head Self-Attention**, enabling the model to weigh how every word in a context window relates to every other word.\n" +
+                    "3. **On-Device Quantization:** By compressing 16-bit floating-point weights into 4-bit integers (`Q4_K_M`), multi-billion-parameter models can run directly inside smartphone RAM."
 
             lower.contains("photosynthesis") ->
-                "**Photosynthesis** is the biochemical process by which green plants, algae, and cyanobacteria convert light energy into chemical energy, $addr:\n\n" +
-                    "• **Formula:** `6 CO₂ + 6 H₂O + Light Energy → C₆H₁₂O₆ (Glucose) + 6 O₂`\n" +
-                    "• **Two Stages:** The **Light-Dependent Reactions** (in the thylakoid membranes, producing ATP and NADPH and releasing oxygen) and the **Calvin Cycle** (in the stroma, fixing carbon dioxide into glucose)."
+                "**Photosynthesis** is the biological process by which green plants, algae, and cyanobacteria convert light energy into chemical energy stored in glucose, $addr:\n\n" +
+                    "• **Chemical Equation:** `6 CO₂ + 6 H₂O + Light Energy → C₆H₁₂O₆ (Glucose) + 6 O₂`\n" +
+                    "• **Light-Dependent Reactions:** Occur in the thylakoid membranes, where chlorophyll absorbs photons to split water molecules, release oxygen (`O₂`), and generate **ATP** and **NADPH**.\n" +
+                    "• **Calvin Cycle (Light-Independent):** Takes place in the chloroplast stroma, using ATP and NADPH to fix carbon dioxide (`CO₂`) into energy-rich three-carbon sugars."
 
             lower.contains("relativity") || lower.contains("e=mc") || lower.contains("einstein") ->
-                "**Albert Einstein's Theory of Relativity** comprises two interconnected theories, $addr:\n\n" +
-                    "1. **Special Relativity (1905):** The speed of light in a vacuum (`c`) is constant for all observers, leading to time dilation, length contraction, and mass-energy equivalence (**`E = mc²`**).\n" +
-                    "2. **General Relativity (1915):** Gravity is not a traditional force pulling across space, but the **curvature of spacetime** caused by mass and energy."
+                "**Albert Einstein's Theory of Relativity** consists of two foundational theories of modern physics, $addr:\n\n" +
+                    "1. **Special Relativity (1905):** Based on the principle that the laws of physics are identical in all inertial frames and the speed of light in a vacuum (`c`) is constant for all observers. It introduces **time dilation**, **length contraction**, and mass-energy equivalence (**`E = mc²`**).\n" +
+                    "2. **General Relativity (1915):** Explains **gravity** not as an invisible pulling force, but as the geometric **curvature of four-dimensional spacetime** caused by mass and energy."
 
             lower.contains("blockchain") || lower.contains("bitcoin") || lower.contains("cryptocurrency") ->
-                "A **Blockchain** is a decentralized, append-only digital ledger distributed across a peer-to-peer network, $addr:\n\n" +
-                    "• **Cryptographic Linking:** Each block contains a batch of validated transactions, a timestamp, and the **SHA-256 cryptographic hash** of the previous block.\n" +
-                    "• **Tamper Resistance:** Altering any past block changes its hash and invalidates every subsequent block unless a majority of the network's consensus (Proof of Work or Proof of Stake) agrees."
+                "A **Blockchain** is a decentralized, cryptographically secured distributed ledger shared across a peer-to-peer network, $addr:\n\n" +
+                    "• **Cryptographic Hash Chaining:** Each block stores a batch of verified transactions, a timestamp, and the **SHA-256 hash** of the previous block.\n" +
+                    "• **Immutability & Consensus:** Modifying any historical record alters its hash and breaks every subsequent block, while consensus mechanisms (**Proof of Work** or **Proof of Stake**) validate new blocks without a central authority."
 
             lower.contains("operating system") || lower.contains("linux kernel") || lower.contains("android architecture") ->
-                "An **Operating System (OS)** manages hardware resources and provides isolated execution environments for applications, $addr:\n\n" +
-                    "• **Core Kernel Duties:** Process scheduling, virtual memory paging, file system I/O, and hardware device drivers.\n" +
-                    "• **Android Architecture:** Built on the **Linux Kernel**, paired with the **Android Runtime (ART)**, hardware abstraction layers (HAL), and Jetpack/Binder IPC security sandboxing."
+                "An **Operating System (OS)** manages hardware resources and provides secure execution sandboxes for applications, $addr:\n\n" +
+                    "• **Core Kernel Responsibilities:** CPU process scheduling, virtual memory paging, file-system management, networking stacks, and hardware device drivers.\n" +
+                    "• **Android System Architecture:** Built on the **Linux Kernel**, paired with the **Android Runtime (ART)** for ahead-of-time and just-in-time compilation, Hardware Abstraction Layers (HAL), and per-app Linux UID security sandboxing."
+
+            lower.contains("dna") || lower.contains("genetics") || lower.contains("rna") ->
+                "**DNA (Deoxyribonucleic Acid)** is the hereditary molecule that carries the genetic instructions for the development and functioning of all living organisms, $addr:\n\n" +
+                    "• **Double-Helix Structure:** Composed of two complementary strands of nucleotides, where **Adenine (A)** pairs with **Thymine (T)** and **Cytosine (C)** pairs with **Guanine (G)**.\n" +
+                    "• **Central Dogma of Biology:** Genetic information flows from **DNA → RNA** (via transcription) **→ Proteins** (via translation in ribosomes)."
+
+            lower.contains("black hole") || lower.contains("event horizon") ->
+                "A **Black Hole** is a region of spacetime where gravity is so intense that nothing—not even light or electromagnetic radiation—can escape once it crosses the **Event Horizon**, $addr:\n\n" +
+                    "• **Formation:** Stellar black holes form when massive stars exhaust their nuclear fuel and collapse under their own gravity in a supernova.\n" +
+                    "• **Key Structure:** Defined by the **Event Horizon** (the point of no return), the accretion disk of superheated infalling matter, and the central gravitational singularity."
+
+            lower.contains("internet") || lower.contains("http") || lower.contains("tcp/ip") || lower.contains("dns") ->
+                "Here is how the **Internet, DNS, TCP/IP, and HTTPS** work together when you load a service, $addr:\n\n" +
+                    "1. **DNS Resolution:** Translates a human-readable domain name into a numerical IP address.\n" +
+                    "2. **TCP/IP & TLS Handshake:** Establishes a reliable packet-switched connection and negotiates end-to-end encryption keys.\n" +
+                    "3. **HTTP/HTTPS Request & Response:** Exchanges structured headers and payloads (JSON, HTML, or media) securely between client and server."
 
             else -> null
         }

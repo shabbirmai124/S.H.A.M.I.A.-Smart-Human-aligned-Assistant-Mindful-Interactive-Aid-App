@@ -361,3 +361,28 @@ fun HudMessageCard(
         }
     }
 }
+
+private fun renderCleanStyledText(raw: String): androidx.compose.ui.text.AnnotatedString {
+    return androidx.compose.ui.text.buildAnnotatedString {
+        val cleaned = raw
+            .replace(Regex("^#{1,4}\\s+", RegexOption.MULTILINE), "")
+            .replace("```kotlin", "")
+            .replace("```python", "")
+            .replace("```javascript", "")
+            .replace("```", "")
+        val boldRegex = Regex("\\*\\*(.+?)\\*\\*")
+        var lastIndex = 0
+        for (match in boldRegex.findAll(cleaned)) {
+            if (match.range.first > lastIndex) {
+                append(cleaned.substring(lastIndex, match.range.first).replace("`", ""))
+            }
+            pushStyle(androidx.compose.ui.text.SpanStyle(fontWeight = FontWeight.SemiBold, color = SapphireBright))
+            append(match.groupValues[1].replace("`", ""))
+            pop()
+            lastIndex = match.range.last + 1
+        }
+        if (lastIndex < cleaned.length) {
+            append(cleaned.substring(lastIndex).replace("`", ""))
+        }
+    }
+}

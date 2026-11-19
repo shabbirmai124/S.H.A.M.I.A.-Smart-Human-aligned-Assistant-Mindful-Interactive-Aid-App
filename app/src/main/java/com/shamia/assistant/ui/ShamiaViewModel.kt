@@ -11,6 +11,7 @@ import com.shamia.assistant.engine.IntentEngine
 import com.shamia.assistant.engine.ModelCatalog
 import com.shamia.assistant.engine.ModelDownloadManager
 import com.shamia.assistant.engine.OfflineCompanion
+import com.shamia.assistant.engine.OnDeviceLlmEngine
 import com.shamia.assistant.engine.OpenSourceAiRepository
 import com.shamia.assistant.engine.RoutineSyllabusStore
 import com.shamia.assistant.engine.ShamiaPrompts
@@ -69,6 +70,10 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
             val soundEnabled = store.loadInteractionSoundEnabled()
             voiceEngine.setInteractionSoundEnabled(soundEnabled)
 
+            val verifiedInstalled = (store.loadInstalledModelIds() + setOf("offline-core"))
+                .filter { id -> id == "offline-core" || OnDeviceLlmEngine.hasRealLocalWeights(application, id) }
+                .toSet()
+
             _ui.update {
                 it.copy(
                     chatSessionId = initialSession,
@@ -82,7 +87,7 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
                     controls = controls,
                     permissions = store.loadPermissions(),
                     customModels = customModels,
-                    installedModelIds = store.loadInstalledModelIds() + setOf("offline-core", "gemma-3-free", "llama-32-free"),
+                    installedModelIds = verifiedInstalled,
                     installedVoiceIds = store.loadInstalledVoiceIds(),
                     selectedModelId = savedSpec.id,
                     recommendedModelId = recommended.id,
@@ -148,6 +153,7 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
 
     fun stopGeneration() {
         val activeMsgId = streamingMessageId
+        OnDeviceLlmEngine.cancelGeneration()
         generationJob?.cancel()
         generationJob = null
         streamingMessageId = null
@@ -307,6 +313,7 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
 
         generationJob = viewModelScope.launch {
             val activeTasks = _ui.value.tasks.filter { !it.completed }.map { it.title }
+            var streamedNatively = false
             val result = if (_ui.value.ensembleEnabled) {
                 OpenSourceAiRepository.runEnsembleLocalAndWeb(
                     prompt = text,
@@ -325,6 +332,7 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
                 )
             } else {
                 OpenSourceAiRepository.dispatchStrictModelRequest(
+                    context = getApplication(),
                     prompt = text,
                     activeSpec = activeSpec,
                     identity = _ui.value.identity,
@@ -339,7 +347,17 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
                     useResearch = shouldSearch,
                     isOnline = _ui.value.telemetry.isOnline,
                     isInstalledLocally = _ui.value.installedModelIds.contains(activeSpec.id) ||
-                        OpenSourceAiRepository.isModelCachedOnDevice(getApplication(), activeSpec.id)
+                        OpenSourceAiRepository.isModelCachedOnDevice(getApplication(), activeSpec.id),
+                    onStreamToken = { partialText ->
+                        streamedNatively = true
+                        _ui.update { s ->
+                            s.copy(
+                                messages = s.messages.map { m ->
+                                    if (m.id == msgId) m.copy(text = "$partialText ▍") else m
+                                }
+                            )
+                        }
+                    }
                 )
             }
 
@@ -348,21 +366,23 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
                 OfflineCompanion.generateReply(text, addr, _ui.value.identity.fullName, _ui.value.routine, _ui.value.syllabus, activeSpec).coachingTip
             } else extractedTip
 
-            // Stream the response smoothly like ChatGPT / Gemini so the user can read as it generates or tap Stop
-            val words = cleanText.split(" ")
-            val stepSize = (words.size / 14).coerceIn(2, 8)
-            var index = stepSize
-            while (index < words.size && isActive) {
-                val partial = words.take(index).joinToString(" ") + " ▍"
-                _ui.update { s ->
-                    s.copy(
-                        messages = s.messages.map { m ->
-                            if (m.id == msgId) m.copy(text = partial, modelLabel = result.modelLabel) else m
-                        }
-                    )
+            // Only run smooth reveal animation if tokens were not already streamed natively token-by-token
+            if (!streamedNatively) {
+                val words = cleanText.split(" ")
+                val stepSize = (words.size / 14).coerceIn(2, 8)
+                var index = stepSize
+                while (index < words.size && isActive) {
+                    val partial = words.take(index).joinToString(" ") + " ▍"
+                    _ui.update { s ->
+                        s.copy(
+                            messages = s.messages.map { m ->
+                                if (m.id == msgId) m.copy(text = partial, modelLabel = result.modelLabel) else m
+                            }
+                        )
+                    }
+                    delay(28L)
+                    index += stepSize
                 }
-                delay(28L)
-                index += stepSize
             }
 
             if (!isActive) return@launch
@@ -667,6 +687,7 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     override fun onCleared() {
+        OnDeviceLlmEngine.cancelGeneration()
         telemetryMonitor.release()
         voiceEngine.release()
         super.onCleared()
