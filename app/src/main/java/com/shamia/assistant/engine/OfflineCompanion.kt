@@ -299,7 +299,15 @@ object OfflineCompanion {
             )
         }
 
-        // 13. Constructive synthesis when Live Web Search context is available
+        // 13. Curated built-in offline knowledge (always preferred over noisy raw search fragments)
+        lookupBuiltInKnowledge(lower, addr)?.let { builtIn ->
+            return OfflineCompanionReply(
+                intent = ConversationalIntent.GENERAL,
+                text = builtIn
+            )
+        }
+
+        // 14. Constructive synthesis when clean encyclopedic web context is available
         if (webContext.isNotBlank()) {
             val synthesized = WebSearchClient.synthesizeConstructiveAnswer(trimmed, webContext, addr)
             if (synthesized.isNotBlank()) {
@@ -681,7 +689,155 @@ object OfflineCompanion {
                     "• **Symmetric Encryption (AES-256-GCM):** Uses a single shared secret key for ultra-fast authenticated encryption of local files and databases.\n" +
                     "• **Asymmetric Encryption (RSA / Ed25519 / ECDH):** Uses a public/private key pair for digital signatures and secure TLS handshakes."
 
-            else -> null
+            lower.contains("gravity") ->
+                "**Gravity** is the fundamental attraction between any two objects that have mass or energy, $addr.\n\n" +
+                    "• **Newton's Law:** Gravitational force is proportional to the product of the two masses and inversely proportional to the square of the distance between them (`F = G · m₁m₂ / r²`).\n" +
+                    "• **Einstein's General Relativity:** Mass and energy curve four-dimensional spacetime, and planets, moons, and light follow the straightest possible paths (geodesics) along that curvature.\n" +
+                    "• **On Earth:** Standard gravitational acceleration at sea level is **9.81 m/s²**."
+
+            lower.contains("python") && !lower.contains("write") ->
+                "**Python** is a high-level, dynamically typed programming language famous for readable syntax and a massive ecosystem, $addr:\n\n" +
+                    "• **Best For:** AI/ML (`PyTorch`, `TensorFlow`), data science (`NumPy`, `Pandas`), automation, and backend APIs (`FastAPI`, `Django`).\n" +
+                    "• **Key Strengths:** Clean indentation-based syntax, batteries-included standard library, and rapid prototyping."
+
+            lower.contains("kotlin") && !lower.contains("write") ->
+                "**Kotlin** is a modern, statically typed language by JetBrains and Google's preferred language for Android development, $addr:\n\n" +
+                    "• **Key Strengths:** Built-in null safety (`?` / `?:`), structured concurrency with **Coroutines & Flow**, concise `data class` / `sealed class` syntax, and 100% interoperability with Java.\n" +
+                    "• **UI Framework:** Pairs natively with **Jetpack Compose** for declarative Material 3 Android apps."
+
+            lower.contains("oop") || lower.contains("object oriented") || lower.contains("object-oriented") ->
+                "**Object-Oriented Programming (OOP)** organizes code around objects that combine data and behavior, built on four pillars, $addr:\n\n" +
+                    "1. **Encapsulation:** Hide internal state behind clean public methods.\n" +
+                    "2. **Abstraction:** Expose only essential contracts (interfaces/abstract classes) and hide complex internals.\n" +
+                    "3. **Inheritance:** Reuse and extend shared behavior across related classes.\n" +
+                    "4. **Polymorphism:** Allow one interface to work cleanly with many different concrete implementations."
+
+            lower.contains("bangladesh") || lower.contains("dhaka") ->
+                "**Bangladesh** is a vibrant South Asian nation located in the fertile Bengal Delta along the Bay of Bengal, $addr.\n\n" +
+                    "• **Capital & Largest City:** **Dhaka**\n" +
+                    "• **Official Language:** **Bengali (Bangla)** · **Currency:** Bangladeshi Taka (**BDT / ৳**)\n" +
+                    "• **Highlights:** Home to the **Sundarbans** (the world's largest mangrove forest), **Cox's Bazar** (one of the longest natural sea beaches), and a fast-growing technology and apparel economy."
+
+            lower.contains("capital of") -> lookupCountryCapital(lower, addr)
+
+            lower.contains("joke") || lower.contains("make me laugh") || lower.contains("funny") ->
+                "Here's a quick one for you, $addr:\n\nWhy do programmers prefer dark mode?\nBecause light attracts bugs!"
+
+            lower.contains("poem") ->
+                "Here is a short original poem for you, $addr:\n\n" +
+                    "*Quiet code beneath the glass,*\n" +
+                    "*Silent thoughts that swiftly pass,*\n" +
+                    "*No distant cloud, no borrowed light—*\n" +
+                    "*Just steady sparks that shine tonight.*"
+
+            lower.contains("motivat") || lower.contains("inspire") || lower.contains("quote") ->
+                "Here is a grounding reminder, $addr:\n\n**\"Small, consistent steps taken every day outperform occasional bursts of perfection.\"** Pick just one meaningful task for the next 20 minutes—momentum always follows action."
+
+            lower.contains("water") && (lower.contains("formula") || lower.contains("boil") || lower.contains("freeze")) ->
+                "**Water (`H₂O`)** consists of two hydrogen atoms bonded to one oxygen atom, $addr:\n\n" +
+                    "• **Freezing Point:** `0 °C` (`32 °F`) at standard atmospheric pressure.\n" +
+                    "• **Boiling Point:** `100 °C` (`212 °F`) at sea level."
+
+            lower.contains("solar system") || lower.contains("planets") ->
+                "The **Solar System** has **8 planets** orbiting the Sun in order from closest to farthest, $addr:\n\n" +
+                    "1. **Mercury**  2. **Venus**  3. **Earth**  4. **Mars** (rocky inner planets)\n" +
+                    "5. **Jupiter**  6. **Saturn** (gas giants)\n" +
+                    "7. **Uranus**  8. **Neptune** (ice giants)"
+
+            lower.contains("cpu") && lower.contains("gpu") ->
+                "**CPU vs. GPU**, $addr:\n\n" +
+                    "• **CPU (Central Processing Unit):** Fewer, very powerful cores optimized for low-latency sequential tasks, OS scheduling, and branching logic.\n" +
+                    "• **GPU (Graphics Processing Unit):** Thousands of smaller parallel cores built for massive matrix math—making it ideal for 3D rendering and neural network inference."
+
+            lower.contains("ram") && (lower.contains("rom") || lower.contains("storage")) ->
+                "**RAM vs. Storage (ROM/Flash)**, $addr:\n\n" +
+                    "• **RAM (Random Access Memory):** Ultra-fast volatile working memory that holds active apps and loaded AI model weights while running—cleared on reboot.\n" +
+                    "• **Storage (UFS / SSD / Flash):** Permanent non-volatile memory where your OS, apps, photos, and downloaded model files stay saved even when powered off."
+
+            lower.contains("what day") || lower.contains("what is the date") || lower.contains("today's date") -> {
+                val fmt = java.text.SimpleDateFormat("EEEE, MMMM d, yyyy", Locale.getDefault())
+                "Today is **${fmt.format(java.util.Date())}**, $addr."
+            }
+
+            lower.contains("what time") || lower.contains("current time") -> {
+                val fmt = java.text.SimpleDateFormat("hh:mm a", Locale.getDefault())
+                "It is currently **${fmt.format(java.util.Date())}**, $addr."
+            }
+
+            else -> tryConvertUnit(lower, addr)
         }
+    }
+
+    private fun lookupCountryCapital(lower: String, addr: String): String? {
+        val capitals = mapOf(
+            "bangladesh" to "Dhaka",
+            "india" to "New Delhi",
+            "pakistan" to "Islamabad",
+            "united states" to "Washington, D.C.",
+            "usa" to "Washington, D.C.",
+            "uk" to "London",
+            "united kingdom" to "London",
+            "england" to "London",
+            "france" to "Paris",
+            "germany" to "Berlin",
+            "japan" to "Tokyo",
+            "china" to "Beijing",
+            "south korea" to "Seoul",
+            "canada" to "Ottawa",
+            "australia" to "Canberra",
+            "italy" to "Rome",
+            "spain" to "Madrid",
+            "brazil" to "Brasília",
+            "saudi arabia" to "Riyadh",
+            "turkey" to "Ankara",
+            "uae" to "Abu Dhabi",
+            "malaysia" to "Kuala Lumpur",
+            "singapore" to "Singapore",
+            "indonesia" to "Jakarta",
+            "nepal" to "Kathmandu",
+            "sri lanka" to "Sri Jayawardenepura Kotte (commercial capital: Colombo)",
+            "egypt" to "Cairo",
+            "russia" to "Moscow"
+        )
+        for ((country, capital) in capitals) {
+            if (lower.contains(country)) {
+                val displayCountry = country.split(" ").joinToString(" ") { it.replaceFirstChar { c -> c.uppercase() } }
+                return "The capital of **$displayCountry** is **$capital**, $addr."
+            }
+        }
+        return null
+    }
+
+    private fun tryConvertUnit(lower: String, addr: String): String? {
+        // Temperature: "37 c to f" or "98.6 f to c"
+        Regex("(-?\\d+(?:\\.\\d+)?)\\s*°?\\s*(c|celsius)\\s*(?:to|in)\\s*°?\\s*(f|fahrenheit)").find(lower)?.let { m ->
+            val c = m.groupValues[1].toDoubleOrNull() ?: return null
+            val f = c * 9.0 / 5.0 + 32.0
+            return "${formatNumber(c)} °C equals **${formatNumber(f)} °F**, $addr."
+        }
+        Regex("(-?\\d+(?:\\.\\d+)?)\\s*°?\\s*(f|fahrenheit)\\s*(?:to|in)\\s*°?\\s*(c|celsius)").find(lower)?.let { m ->
+            val f = m.groupValues[1].toDoubleOrNull() ?: return null
+            val c = (f - 32.0) * 5.0 / 9.0
+            return "${formatNumber(f)} °F equals **${formatNumber(c)} °C**, $addr."
+        }
+        // Distance: km <-> miles
+        Regex("(\\d+(?:\\.\\d+)?)\\s*(km|kilometers?)\\s*(?:to|in)\\s*(mi|miles?)").find(lower)?.let { m ->
+            val km = m.groupValues[1].toDoubleOrNull() ?: return null
+            return "${formatNumber(km)} km equals **${formatNumber(km * 0.621371)} miles**, $addr."
+        }
+        Regex("(\\d+(?:\\.\\d+)?)\\s*(mi|miles?)\\s*(?:to|in)\\s*(km|kilometers?)").find(lower)?.let { m ->
+            val mi = m.groupValues[1].toDoubleOrNull() ?: return null
+            return "${formatNumber(mi)} miles equals **${formatNumber(mi * 1.60934)} km**, $addr."
+        }
+        // Weight: kg <-> lbs
+        Regex("(\\d+(?:\\.\\d+)?)\\s*(kg|kilograms?)\\s*(?:to|in)\\s*(lb|lbs|pounds?)").find(lower)?.let { m ->
+            val kg = m.groupValues[1].toDoubleOrNull() ?: return null
+            return "${formatNumber(kg)} kg equals **${formatNumber(kg * 2.20462)} lbs**, $addr."
+        }
+        Regex("(\\d+(?:\\.\\d+)?)\\s*(lb|lbs|pounds?)\\s*(?:to|in)\\s*(kg|kilograms?)").find(lower)?.let { m ->
+            val lb = m.groupValues[1].toDoubleOrNull() ?: return null
+            return "${formatNumber(lb)} lbs equals **${formatNumber(lb * 0.453592)} kg**, $addr."
+        }
+        return null
     }
 }

@@ -65,9 +65,9 @@ internal object CloudModelResolver {
         var cleaned = WebSearchClient.decodeHtmlEntities(rawText.trim(), collapseNewlines = false)
 
         cleaned = cleaned
-            .replace(Regex("^\\s*\\[(?:Active\\s+)?Model:[^\\]]+\\]\\s*", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("^\\s*\\[[^\\]]*?(?:Offline Core|ID:\\s*offline-core|DeepSeek\\s*2B|Web Grounded Fallback|Local Mode)[^\\]]*\\]\\s*", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("For full .*? inference offline in Termux.*", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("^\\s*\\[(?:Active\\s+)?Model:[^\\]]+\\]\\s*", setOf(RegexOption.IGNORE_CASE, RegexOption.MULTILINE)), "")
+            .replace(Regex("^\\s*\\[[^\\]]*?(?:Offline Core|ID:\\s*offline-core|DeepSeek\\s*2B|Web Grounded Fallback|Local Mode)[^\\]]*\\]\\s*", setOf(RegexOption.IGNORE_CASE, RegexOption.MULTILINE)), "")
+            .replace(Regex("For full .*? inference offline in Termux[\\s\\S]*$", RegexOption.IGNORE_CASE), "")
             .replace(Regex("Live Google & Web Search found for you[^:]*:\\s*", RegexOption.IGNORE_CASE), "")
             .replace(Regex("Here is what live open web search found[^:]*:\\s*", RegexOption.IGNORE_CASE), "")
             .trim()

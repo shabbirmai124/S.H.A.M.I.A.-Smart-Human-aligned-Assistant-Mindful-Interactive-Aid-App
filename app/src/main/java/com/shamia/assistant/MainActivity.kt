@@ -2,6 +2,7 @@ package com.shamia.assistant
 
 import android.Manifest
 import android.app.Activity
+import android.content.ComponentCallbacks2
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
@@ -23,6 +24,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.shamia.assistant.engine.OnDeviceLlmEngine
 import com.shamia.assistant.model.AppThemeMode
 import com.shamia.assistant.ui.ShamiaHudScreen
 import com.shamia.assistant.ui.ShamiaViewModel
@@ -30,6 +32,15 @@ import com.shamia.assistant.ui.theme.ShamiaTheme
 import java.util.Locale
 
 class MainActivity : ComponentActivity() {
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        @Suppress("DEPRECATION")
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL || level == ComponentCallbacks2.TRIM_MEMORY_BACKGROUND) {
+            OnDeviceLlmEngine.releaseIfIdle()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()

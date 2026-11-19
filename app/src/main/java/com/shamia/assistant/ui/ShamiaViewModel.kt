@@ -9,6 +9,7 @@ import com.shamia.assistant.engine.DeviceExecutor
 import com.shamia.assistant.engine.DeviceTelemetryMonitor
 import com.shamia.assistant.engine.EarconKind
 import com.shamia.assistant.engine.IntentEngine
+import com.shamia.assistant.engine.ModelBackgroundHub
 import com.shamia.assistant.engine.ModelCatalog
 import com.shamia.assistant.engine.ModelDownloadManager
 import com.shamia.assistant.engine.OfflineCompanion
@@ -79,7 +80,8 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
             val verifiedInstalled = (store.loadInstalledModelIds() + setOf("offline-core"))
                 .filter { id -> id == "offline-core" || OnDeviceLlmEngine.hasRealLocalWeights(application, id) }
                 .toSet()
-            val partials = ModelDownloadManager.scanAllPartialDownloadPercents(application, allModels.map { it.id })
+            ModelBackgroundHub.syncInitialPartials(application, allModels.map { it.id })
+            val bgNow = ModelBackgroundHub.state.value
 
             _ui.update {
                 it.copy(
@@ -94,8 +96,12 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
                     controls = controls,
                     permissions = store.loadPermissions(),
                     customModels = customModels,
-                    installedModelIds = verifiedInstalled,
-                    partialDownloadPercents = partials,
+                    installedModelIds = verifiedInstalled + bgNow.newlyInstalledModelIds,
+                    modelDownloadProgress = bgNow.downloadProgress,
+                    partialDownloadPercents = bgNow.partialPercents,
+                    loadedInRamModelId = bgNow.loadedInRamModelId,
+                    loadingInRamModelId = bgNow.loadingInRamModelId,
+                    loadedBackendLabel = bgNow.loadedBackendLabel,
                     installedVoiceIds = store.loadInstalledVoiceIds(),
                     selectedModelId = savedSpec.id,
                     recommendedModelId = recommended.id,
@@ -112,9 +118,9 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
                 )
             }
 
-            // Auto pre-warm the active installed neural model in the background for instant offline first-token speed
+            // Auto pre-warm the active installed neural model via process-scoped background service
             if (!savedSpec.isBuiltInOffline && verifiedInstalled.contains(savedSpec.id)) {
-                ShamiaStateDelegates.preloadModelIntoRam(application, viewModelScope, _ui, savedSpec.id)
+                ShamiaStateDelegates.preloadModelIntoRam(application, _ui, savedSpec.id)
             }
 
             voiceEngine.initTts(
@@ -141,15 +147,40 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
             )
         }
 
+        // Stay continuously synchronized with process-scoped background downloads, RAM preloading & live hardware telemetry
+        viewModelScope.launch {
+            ModelBackgroundHub.state.collect { bg ->
+                val liveHw = OpenSourceAiRepository.detectHardware(application)
+                _ui.update { cur ->
+                    cur.copy(
+                        hardware = liveHw,
+                        modelDownloadProgress = bg.downloadProgress,
+                        partialDownloadPercents = bg.partialPercents,
+                        installedModelIds = cur.installedModelIds + bg.newlyInstalledModelIds,
+                        loadedInRamModelId = bg.loadedInRamModelId,
+                        loadingInRamModelId = bg.loadingInRamModelId,
+                        loadedBackendLabel = bg.loadedBackendLabel
+                    )
+                }
+            }
+        }
+
         viewModelScope.launch {
             telemetryMonitor.telemetry.collect { snap -> _ui.update { it.copy(telemetry = snap) } }
         }
 
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             while (true) {
                 val hasActiveAlarm = _ui.value.alarms.any { it.active }
                 delay(if (hasActiveAlarm) 1000L else 15_000L)
-                _ui.update { it.copy(nowMillis = System.currentTimeMillis(), clockLabel = clockFormat()) }
+                val liveHw = OpenSourceAiRepository.detectHardware(application)
+                _ui.update {
+                    it.copy(
+                        nowMillis = System.currentTimeMillis(),
+                        clockLabel = clockFormat(),
+                        hardware = liveHw
+                    )
+                }
             }
         }
     }
@@ -192,8 +223,12 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
                 state.messages.map { m ->
                     if (m.id == activeMsgId) {
                         val currentText = m.text.removeSuffix(" ▍").trim()
+                        val isPlaceholder = currentText.isEmpty() ||
+                            currentText == "Thinking..." ||
+                            currentText.startsWith("Loading ") ||
+                            currentText.startsWith("Generating on ")
                         m.copy(
-                            text = if (currentText.isEmpty() || currentText == "Thinking...") {
+                            text = if (isPlaceholder) {
                                 "Response stopped."
                             } else {
                                 "$currentText\n\n*(Stopped)*"
@@ -225,10 +260,11 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
         voiceEngine.stopSpeaking()
         val chosen = _ui.value.allModels.find { it.id == modelId } ?: _ui.value.selectedModel
         store.saveSelectedModelId(chosen.id)
-        viewModelScope.launch {
+        ModelBackgroundHub.cancelStalePreload(exceptModelId = chosen.id)
+        viewModelScope.launch(Dispatchers.IO) {
             OnDeviceLlmEngine.unloadIfDifferent(chosen.id)
             if (!chosen.isBuiltInOffline && OnDeviceLlmEngine.hasRealLocalWeights(getApplication(), chosen.id)) {
-                ShamiaStateDelegates.preloadModelIntoRam(getApplication(), viewModelScope, _ui, chosen.id)
+                ShamiaStateDelegates.preloadModelIntoRam(getApplication(), _ui, chosen.id)
             }
         }
         val freshSession = "session-${System.currentTimeMillis()}"
@@ -248,10 +284,11 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
     fun selectModel(modelId: String) {
         val chosen = _ui.value.allModels.find { it.id == modelId } ?: return
         store.saveSelectedModelId(chosen.id)
-        viewModelScope.launch {
+        ModelBackgroundHub.cancelStalePreload(exceptModelId = chosen.id)
+        viewModelScope.launch(Dispatchers.IO) {
             OnDeviceLlmEngine.unloadIfDifferent(chosen.id)
             if (!chosen.isBuiltInOffline && OnDeviceLlmEngine.hasRealLocalWeights(getApplication(), chosen.id)) {
-                ShamiaStateDelegates.preloadModelIntoRam(getApplication(), viewModelScope, _ui, chosen.id)
+                ShamiaStateDelegates.preloadModelIntoRam(getApplication(), _ui, chosen.id)
             }
         }
         Log.i("ShamiaModelRouter", "MODEL SWITCH -> id=${chosen.id}, name=${chosen.name}")
@@ -388,7 +425,10 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
             )
         }
 
-        generationJob = viewModelScope.launch {
+        // Cancel any stale preload for a different model so the user's answer never waits behind an old model
+        ModelBackgroundHub.cancelStalePreload(exceptModelId = activeSpec.id)
+
+        generationJob = viewModelScope.launch(Dispatchers.IO) {
             val activeTasks = _ui.value.tasks.filter { !it.completed }.map { it.title }
             var streamedNatively = false
             val result = if (_ui.value.ensembleEnabled) {
@@ -426,14 +466,27 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
                     isOnline = _ui.value.telemetry.isOnline,
                     isInstalledLocally = _ui.value.installedModelIds.contains(activeSpec.id) ||
                         OpenSourceAiRepository.isModelCachedOnDevice(getApplication(), activeSpec.id),
+                    onPhaseChanged = { phaseText ->
+                        if (!streamedNatively && isActive) {
+                            _ui.update { s ->
+                                s.copy(
+                                    messages = s.messages.map { m ->
+                                        if (m.id == msgId) m.copy(text = phaseText) else m
+                                    }
+                                )
+                            }
+                        }
+                    },
                     onStreamToken = { partialText ->
                         streamedNatively = true
-                        _ui.update { s ->
-                            s.copy(
-                                messages = s.messages.map { m ->
-                                    if (m.id == msgId) m.copy(text = "$partialText ▍") else m
-                                }
-                            )
+                        if (isActive) {
+                            _ui.update { s ->
+                                s.copy(
+                                    messages = s.messages.map { m ->
+                                        if (m.id == msgId) m.copy(text = "$partialText ▍") else m
+                                    }
+                                )
+                            }
                         }
                     }
                 )
@@ -466,12 +519,16 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
             if (!isActive) return@launch
 
             streamingMessageId = null
+            val freshHw = OpenSourceAiRepository.detectHardware(getApplication())
+            val rt = OnDeviceLlmEngine.runtimeState.value
             _ui.update { s ->
                 s.copy(
                     isGenerating = false,
                     coreState = CoreVisualState.IDLE,
-                    loadedInRamModelId = OnDeviceLlmEngine.currentLoadedModelId() ?: s.loadedInRamModelId,
-                    loadedBackendLabel = OnDeviceLlmEngine.currentLoadedBackend().ifBlank { s.loadedBackendLabel },
+                    hardware = freshHw,
+                    loadedInRamModelId = rt.loadedModelId,
+                    loadingInRamModelId = rt.loadingModelId,
+                    loadedBackendLabel = rt.backendLabel,
                     messages = s.messages.map { m ->
                         if (m.id == msgId) {
                             m.copy(
@@ -761,10 +818,14 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
         ShamiaStateDelegates.installOrRemoveModel(getApplication(), viewModelScope, _ui, store, modelId)
 
     fun pauseModelDownload(modelId: String) =
-        ShamiaStateDelegates.pauseModelDownload(getApplication(), _ui, modelId)
+        ShamiaStateDelegates.pauseModelDownload(getApplication(), modelId)
 
-    fun preloadModelIntoRam(modelId: String) =
-        ShamiaStateDelegates.preloadModelIntoRam(getApplication(), viewModelScope, _ui, modelId)
+    fun preloadModelIntoRam(modelId: String) {
+        val chosen = _ui.value.allModels.find { it.id == modelId } ?: return
+        store.saveSelectedModelId(chosen.id)
+        _ui.update { it.copy(selectedModelId = chosen.id) }
+        ShamiaStateDelegates.preloadModelIntoRam(getApplication(), _ui, chosen.id)
+    }
 
     fun importLocalModelFile(modelId: String, uri: Uri) =
         ShamiaStateDelegates.importModelTaskFile(getApplication(), viewModelScope, _ui, store, modelId, uri)

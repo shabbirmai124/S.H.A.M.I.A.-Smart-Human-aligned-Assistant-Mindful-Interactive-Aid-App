@@ -130,17 +130,27 @@ object ModelDownloadManager {
                 val obj = arr.optJSONObject(i) ?: continue
                 val path = obj.optString("path")
                 val size = obj.optLong("size", 0L)
-                val isBundle = path.endsWith(".task", ignoreCase = true) || path.endsWith(".litertlm", ignoreCase = true)
-                if (isBundle && size > MIN_REAL_MODEL_BYTES) {
+                // MediaPipe tasks-genai natively executes .task and .bin bundles
+                val isMediaPipeBundle = path.endsWith(".task", ignoreCase = true) || path.endsWith(".bin", ignoreCase = true)
+                if (isMediaPipeBundle && size > MIN_REAL_MODEL_BYTES) {
                     candidates.add(path to size)
                 }
             }
             if (candidates.isEmpty()) return@runCatching null
 
-            // Prefer .task (universal native MediaPipe), then compact INT4/Q4 quantization, then smallest file size for fastest download & load!
+            // Prefer native .task bundles with seq128 (highest MediaPipe tasks-genai stability across all Android CPUs/GPUs),
+            // then compact quantization (INT4/Q4 -> INT8/Q8), then smallest size for fastest download & RAM load.
             val best = candidates.sortedWith(
                 compareBy<Pair<String, Long>>(
                     { if (it.first.endsWith(".task", ignoreCase = true)) 0 else 1 },
+                    {
+                        val lower = it.first.lowercase()
+                        when {
+                            lower.contains("seq128") -> 0
+                            !lower.contains("multi-prefill") -> 1
+                            else -> 2
+                        }
+                    },
                     {
                         val lower = it.first.lowercase()
                         when {
@@ -509,6 +519,9 @@ object ModelDownloadManager {
                                             delay(350L * attempt)
                                             continue
                                         }
+                                        if (start > 0L && code != 206) {
+                                            throw IllegalStateException("Server ignored Range header (HTTP $code) for chunk $chunkIdx")
+                                        }
                                         if (code != 206 && code != 200) {
                                             throw IllegalStateException("HTTP $code for chunk $chunkIdx")
                                         }
@@ -562,6 +575,16 @@ object ModelDownloadManager {
                     }
                 }
                 workers.awaitAll()
+            }
+
+            // Verify exact size and valid ZIP/MediaPipe archive integrity before finalizing
+            if (completedSet.size != totalChunks || partFile.length() != totalBytes) {
+                throw IllegalStateException("Incomplete download (${completedSet.size}/$totalChunks chunks)")
+            }
+            if (finalFile.name.endsWith(".task", ignoreCase = true) && !hasValidZipHeader(partFile)) {
+                runCatching { checkpointFile.delete() }
+                runCatching { partFile.delete() }
+                return false to "Downloaded bundle failed integrity check. Tap Download to retry."
             }
 
             // Finalize atomic move
@@ -774,6 +797,20 @@ object ModelDownloadManager {
         }
         onProgress(100, "${voice.name} ready offline")
         true
+    }
+
+    private fun hasValidZipHeader(file: File): Boolean {
+        return runCatching {
+            if (!file.isFile || file.length() < 4L) return@runCatching false
+            RandomAccessFile(file, "r").use { raf ->
+                val b0 = raf.read()
+                val b1 = raf.read()
+                val b2 = raf.read()
+                val b3 = raf.read()
+                // Standard ZIP local file header PK\x03\x04 (MediaPipe .task bundles are ZIP archives)
+                b0 == 0x50 && b1 == 0x4B && b2 == 0x03 && b3 == 0x04
+            }
+        }.getOrDefault(false)
     }
 
     fun removeVoiceCache(context: Context, voiceId: String) {

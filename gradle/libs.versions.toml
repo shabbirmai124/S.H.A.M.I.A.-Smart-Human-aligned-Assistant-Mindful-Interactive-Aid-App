@@ -6,7 +6,7 @@ lifecycleRuntimeKtx = "2.8.7"
 activityCompose = "1.9.3"
 composeBom = "2024.12.01"
 coroutines = "1.9.0"
-mediapipeTasksGenai = "0.10.24"
+mediapipeTasksGenai = "0.10.29"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }

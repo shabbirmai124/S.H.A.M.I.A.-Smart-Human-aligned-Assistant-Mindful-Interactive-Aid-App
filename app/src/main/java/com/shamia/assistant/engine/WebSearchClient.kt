@@ -111,8 +111,13 @@ object WebSearchClient {
                                     val title = decodeHtmlEntities(page.optString("title"))
                                     val extract = decodeHtmlEntities(page.optString("extract"))
                                     val pageId = page.optLong("pageid")
-                                    if (title.isNotEmpty() && extract.length > 35) {
-                                        wikiFacts.add("$title: $extract")
+                                    val titleLower = title.lowercase(Locale.US)
+                                    val extractLower = extract.lowercase(Locale.US)
+                                    val titleRelevant = queryTokens.isEmpty() ||
+                                        queryTokens.any { tok -> titleLower.contains(tok) } ||
+                                        (queryTokens.size >= 2 && queryTokens.count { tok -> extractLower.contains(tok) } >= 2)
+                                    if (title.isNotEmpty() && extract.length > 45 && titleRelevant) {
+                                        wikiFacts.add(extract)
                                         wikiLinks.add(GroundingLink(title, "https://en.wikipedia.org/?curid=$pageId"))
                                     }
                                 }
@@ -139,22 +144,10 @@ object WebSearchClient {
                             val abstractText = decodeHtmlEntities(ddg.optString("AbstractText"))
                             val abstractUrl = ddg.optString("AbstractURL").trim()
                             val heading = decodeHtmlEntities(ddg.optString("Heading"))
-                            if (abstractText.isNotEmpty()) {
+                            if (abstractText.length > 35) {
                                 ddgFacts.add(abstractText)
                                 if (abstractUrl.isNotEmpty()) {
-                                    ddgLinks.add(GroundingLink(heading.ifEmpty { "DuckDuckGo Instant Summary" }, abstractUrl))
-                                }
-                            }
-                            val related = ddg.optJSONArray("RelatedTopics") ?: JSONArray()
-                            for (i in 0 until minOf(2, related.length())) {
-                                val item = related.optJSONObject(i) ?: continue
-                                val rText = decodeHtmlEntities(item.optString("Text"))
-                                val rUrl = item.optString("FirstURL").trim()
-                                if (rText.length > 30) {
-                                    ddgFacts.add(rText)
-                                    if (rUrl.isNotEmpty()) {
-                                        ddgLinks.add(GroundingLink(rText.take(48), rUrl))
-                                    }
+                                    ddgLinks.add(GroundingLink(heading.ifEmpty { cleanQuery }, abstractUrl))
                                 }
                             }
                         }
@@ -163,10 +156,13 @@ object WebSearchClient {
                     ddgFacts to ddgLinks
                 }
 
-                // 3. Google News RSS (filtered for relevance & stripped of HTML entities)
+                // 3. Google News RSS — ONLY fetched when the user explicitly asks for current news/latest updates
+                val wantsNews = Regex("\\b(news|latest|today|headline|breaking|2025|2026|update|score|match|price|weather)\\b", RegexOption.IGNORE_CASE)
+                    .containsMatchIn(query)
                 val newsDeferred = async {
                     val newsFacts = mutableListOf<String>()
                     val newsLinks = mutableListOf<GroundingLink>()
+                    if (!wantsNews) return@async newsFacts to newsLinks
                     runCatching {
                         val url = URL("https://news.google.com/rss/search?q=$encoded&hl=en-US&gl=US&ceid=US:en")
                         val conn = (url.openConnection() as HttpURLConnection).apply {
@@ -187,7 +183,8 @@ object WebSearchClient {
                                 val link = Regex("<link>([\\s\\S]*?)</link>").find(block)?.groupValues?.get(1)
                                     ?.trim().orEmpty()
                                 val lowerTitle = cleanTitle.lowercase(Locale.US)
-                                val relevant = queryTokens.isEmpty() || queryTokens.any { lowerTitle.contains(it) }
+                                val relevant = queryTokens.isEmpty() || queryTokens.all { lowerTitle.contains(it) } ||
+                                    (queryTokens.size >= 2 && queryTokens.count { lowerTitle.contains(it) } >= 2)
                                 if (cleanTitle.length > 20 && link.isNotEmpty() && relevant) {
                                     newsLinks.add(GroundingLink(cleanTitle, link))
                                     newsFacts.add(cleanTitle)
@@ -206,48 +203,42 @@ object WebSearchClient {
                 val allFacts = buildList {
                     addAll(ddgFacts)
                     addAll(wikiFacts)
-                    if (isEmpty() || query.contains(Regex("\\b(news|latest|today|2025|2026|update)\\b", RegexOption.IGNORE_CASE))) {
-                        addAll(newsFacts.take(3))
-                    }
+                    if (wantsNews) addAll(newsFacts.take(3))
                 }.distinct()
 
-                val allLinks = (ddgLinks + wikiLinks + newsLinks).distinctBy { it.uri }.take(5)
-                val structuredContext = allFacts.joinToString("\n• ", prefix = if (allFacts.isNotEmpty()) "• " else "")
+                val allLinks = (ddgLinks + wikiLinks + newsLinks).distinctBy { it.uri }.take(4)
+                val structuredContext = allFacts.joinToString("\n\n")
                 structuredContext to allLinks
             }
         }
 
     /**
-     * Synthesizes a clean, constructive, natural human answer from search facts when
-     * offline/local synthesis is used, never dumping raw pipe-separated fragments or terminal commands.
+     * Synthesizes a clean, constructive, natural human answer directly from verified encyclopedic
+     * context — never dumping raw pipe-separated fragments, unrelated news, or robotic headers.
      */
     fun synthesizeConstructiveAnswer(
         userQuery: String,
         searchContext: String,
         addressAs: String
     ): String {
-        val addr = addressAs.trim().ifEmpty { "Sir" }
-        val cleanFacts = decodeHtmlEntities(searchContext)
-            .split(Regex("[\n|•]+"))
-            .map { it.trim() }
-            .filter { it.length > 25 }
+        val cleanParagraphs = decodeHtmlEntities(searchContext, collapseNewlines = false)
+            .split(Regex("\\n{2,}|\\s*\\|\\s*"))
+            .map { it.trim().removePrefix("•").trim() }
+            .filter { it.length > 40 }
             .distinct()
 
-        if (cleanFacts.isEmpty()) return ""
+        if (cleanParagraphs.isEmpty()) return ""
 
-        val primary = cleanFacts.first()
-        val supporting = cleanFacts.drop(1).take(2)
+        val primary = cleanParagraphs.first()
+        val secondary = cleanParagraphs.drop(1).firstOrNull()
 
         return buildString {
-            append("Here is a clear summary of what I found for you, $addr:\n\n")
             append(primary)
-            if (!primary.endsWith(".")) append(".")
-            if (supporting.isNotEmpty()) {
-                append("\n\nKey highlights:\n")
-                supporting.forEach { item ->
-                    val sentence = if (item.endsWith(".")) item else "$item."
-                    append("• $sentence\n")
-                }
+            if (!primary.endsWith(".") && !primary.endsWith("!") && !primary.endsWith("?")) append(".")
+            if (!secondary.isNullOrBlank() && secondary.length > 45) {
+                append("\n\n")
+                append(secondary)
+                if (!secondary.endsWith(".") && !secondary.endsWith("!") && !secondary.endsWith("?")) append(".")
             }
         }.trim()
     }

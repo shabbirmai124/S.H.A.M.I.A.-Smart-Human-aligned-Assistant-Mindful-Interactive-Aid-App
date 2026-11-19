@@ -49,29 +49,8 @@ object OpenSourceAiRepository {
     val VOICE_MODELS: List<OfflineVoiceModelSpec> get() = ModelCatalog.VOICE_MODELS
     val AMBIENT_TRACKS: List<AmbientTrack> get() = ModelCatalog.AMBIENT_TRACKS
 
-    fun detectHardware(context: Context): DeviceHardwareSpec {
-        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-        val info = ActivityManager.MemoryInfo()
-        am.getMemoryInfo(info)
-        val ramGb = maxOf(4, Math.round(info.totalMem / (1024.0 * 1024.0 * 1024.0)).toInt())
-        val availRamMb = (info.availMem / (1024L * 1024L)).toInt().coerceAtLeast(512)
-        val isLowMem = info.lowMemory && availRamMb < 384
-        val cores = Runtime.getRuntime().availableProcessors().coerceAtLeast(4)
-        val label = "${Build.MANUFACTURER.replaceFirstChar { it.uppercase() }} ${Build.MODEL}"
-        val tier = if (isLowMem) {
-            "Low-RAM Safe Mode ($ramGb GB)"
-        } else {
-            "$availRamMb MB Free · Local Hardware Ready"
-        }
-        return DeviceHardwareSpec(
-            ramGb = ramGb,
-            availRamMb = availRamMb,
-            isLowMemory = isLowMem,
-            cpuCores = cores,
-            deviceLabel = label,
-            recommendedTier = tier
-        )
-    }
+    fun detectHardware(context: Context): DeviceHardwareSpec =
+        HardwareOptimizer.detectLiveHardware(context)
 
     suspend fun searchGoogleAndOpenWeb(query: String): Pair<String, List<GroundingLink>> =
         WebSearchClient.searchGoogleAndOpenWeb(query)
@@ -236,6 +215,7 @@ object OpenSourceAiRepository {
         useResearch: Boolean,
         isOnline: Boolean = true,
         isInstalledLocally: Boolean = false,
+        onPhaseChanged: ((String) -> Unit)? = null,
         onStreamToken: ((String) -> Unit)? = null
     ): ModelDispatchResult {
         val addr = identity.addressAs.trim().ifEmpty { "Sir" }
@@ -334,48 +314,58 @@ object OpenSourceAiRepository {
             resolvedBackendId = resolvedBackendId
         )
 
-        // 3. STRICT CASE B (Priority 1): Verified On-Device MediaPipe LiteRT Neural Weights for THIS exact modelId
-        if (context != null && verifiedLocal != null) {
-            OnDeviceLlmEngine.generateOfflineStream(
-                context = context,
-                spec = activeSpec,
-                systemInstruction = systemInstruction,
-                history = sameModelHistory,
-                userPrompt = prompt,
-                webContext = webSummary,
-                onPartialResponse = { partial ->
-                    onStreamToken?.invoke(
-                        CloudModelResolver.sanitizeReplyForActiveModel(partial, activeSpec, identity, activeSpec.id)
-                    )
+        // 3. Priority 1: On-Device MediaPipe LiteRT Neural Weights for selected model (or any installed local model on disk while another downloads)
+        if (context != null) {
+            val targetLocalSpec = when {
+                verifiedLocal != null -> activeSpec
+                else -> {
+                    val anyInstalledId = OnDeviceLlmEngine.findAnyInstalledModelId(context, ModelCatalog.CATALOG.map { it.id })
+                    anyInstalledId?.let { id -> ModelCatalog.CATALOG.find { it.id == id } }
                 }
-            )?.let { nativeOut ->
-                if (nativeOut.verifiedModelId == activeSpec.id && !isLowQualityOrBrokenReply(nativeOut.text)) {
-                    val cleanReply = CloudModelResolver.sanitizeReplyForActiveModel(
-                        nativeOut.text,
-                        activeSpec,
-                        identity,
-                        nativeOut.verifiedModelId
-                    )
-                    return ModelDispatchResult(
-                        replyText = cleanReply,
-                        source = if (links.isNotEmpty()) MessageSource.CLOUD_RESEARCH else MessageSource.OFFLINE_CORE,
-                        modelLabel = activeSpec.name,
-                        groundingLinks = links,
-                        executionMeta = ModelExecutionMeta(
-                            requestedModelId = activeSpec.id,
-                            requestedModelName = activeSpec.name,
-                            executedModelId = nativeOut.verifiedModelId,
-                            providerEngine = nativeOut.backendLabel,
-                            cacheBypassed = true,
-                            verifiedExactModel = true,
-                            verificationProof = nativeOut.verificationProof
+            }
+            if (targetLocalSpec != null) {
+                OnDeviceLlmEngine.generateOfflineStream(
+                    context = context,
+                    spec = targetLocalSpec,
+                    systemInstruction = systemInstruction,
+                    history = sameModelHistory,
+                    userPrompt = prompt,
+                    webContext = webSummary,
+                    onPhaseChanged = onPhaseChanged,
+                    onPartialResponse = { partial ->
+                        onStreamToken?.invoke(
+                            CloudModelResolver.sanitizeReplyForActiveModel(partial, activeSpec, identity, targetLocalSpec.id)
                         )
-                    )
+                    }
+                )?.let { nativeOut ->
+                    if (!isLowQualityOrBrokenReply(nativeOut.text)) {
+                        val cleanReply = CloudModelResolver.sanitizeReplyForActiveModel(
+                            nativeOut.text,
+                            activeSpec,
+                            identity,
+                            nativeOut.verifiedModelId
+                        )
+                        return ModelDispatchResult(
+                            replyText = cleanReply,
+                            source = if (links.isNotEmpty()) MessageSource.CLOUD_RESEARCH else MessageSource.OFFLINE_CORE,
+                            modelLabel = activeSpec.name,
+                            groundingLinks = links,
+                            executionMeta = ModelExecutionMeta(
+                                requestedModelId = activeSpec.id,
+                                requestedModelName = activeSpec.name,
+                                executedModelId = nativeOut.verifiedModelId,
+                                providerEngine = nativeOut.backendLabel,
+                                cacheBypassed = true,
+                                verifiedExactModel = nativeOut.verifiedModelId == activeSpec.id,
+                                verificationProof = nativeOut.verificationProof
+                            )
+                        )
+                    }
                 }
             }
         }
 
-        // 4. STRICT CASE B (Priority 2): Verified Local Termux / LAN Ollama matching THIS exact model tag
+        // 4. Priority 2: Verified Local Termux / LAN Ollama matching THIS exact model tag
         val targetTag = activeSpec.ollamaTag.orEmpty()
         if (targetTag.isNotBlank()) {
             queryLocalOllamaStrict(ollamaEndpoint, targetTag, prompt, systemInstruction, sameModelHistory, webSummary)?.let { out ->
@@ -401,10 +391,12 @@ object OpenSourceAiRepository {
         }
 
         // 5. Silent background fallback: never announce model status or blocked notices — answer the user's input directly!
-        val (effectiveWeb, effectiveLinks) = if (webSummary.isBlank() && isOnline && isDirectAnswerNeededFromWeb(prompt)) {
+        val (effectiveWeb, effectiveLinks) = if (useResearch && webSummary.isNotBlank()) {
+            webSummary to links
+        } else if (isOnline && isDirectAnswerNeededFromWeb(prompt)) {
             searchGoogleAndOpenWeb(prompt)
         } else {
-            webSummary to links
+            "" to emptyList()
         }
         val directReply = OfflineCompanion.generateReply(
             input = prompt,
@@ -425,11 +417,12 @@ object OpenSourceAiRepository {
             identity = identity,
             executedBackendId = activeSpec.id
         )
+        val showLinks = if (useResearch) effectiveLinks else emptyList()
         return ModelDispatchResult(
             replyText = cleanDirect,
-            source = if (effectiveLinks.isNotEmpty()) MessageSource.CLOUD_RESEARCH else MessageSource.OFFLINE_CORE,
+            source = if (showLinks.isNotEmpty()) MessageSource.CLOUD_RESEARCH else MessageSource.OFFLINE_CORE,
             modelLabel = activeSpec.name,
-            groundingLinks = effectiveLinks,
+            groundingLinks = showLinks,
             executionMeta = ModelExecutionMeta(
                 requestedModelId = activeSpec.id,
                 requestedModelName = activeSpec.name,

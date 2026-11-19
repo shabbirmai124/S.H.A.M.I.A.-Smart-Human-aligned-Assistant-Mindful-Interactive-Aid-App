@@ -1,9 +1,14 @@
 package com.shamia.assistant.ui.tabs
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -92,7 +97,38 @@ fun ModelsHubTab(
     onStartNewChatWithActiveModel: () -> Unit
 ) {
     val activeSpec = state.selectedModel
+    val context = LocalContext.current
     var pendingImportModelId by remember { mutableStateOf<String?>(null) }
+    var pendingDownloadModelId by remember { mutableStateOf<String?>(null) }
+
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { _ ->
+        val modelId = pendingDownloadModelId
+        pendingDownloadModelId = null
+        if (modelId != null) {
+            onToggleInstallModel(modelId)
+        }
+    }
+
+    val startDownloadWithBgNotification: (String) -> Unit = { modelId ->
+        val isInstalledNow = state.installedModelIds.contains(modelId)
+        if (!isInstalledNow && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val granted = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+            if (granted) {
+                onToggleInstallModel(modelId)
+            } else {
+                pendingDownloadModelId = modelId
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        } else {
+            onToggleInstallModel(modelId)
+        }
+    }
+
     val importTaskLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
@@ -129,12 +165,24 @@ fun ModelsHubTab(
                         }
                     }
                     Text(
-                        text = "Device: ${state.hardware.deviceLabel} · RAM: ${state.hardware.ramGb} GB (${state.hardware.availRamMb} MB Free) · CPU Cores: ${state.hardware.cpuCores}",
+                        text = "Device: ${state.hardware.deviceLabel} · RAM: ${state.hardware.ramGb} GB (${state.hardware.availRamMb} MB Free) · ${state.hardware.cpuCores} Cores",
                         style = MaterialTheme.typography.bodySmall,
                         color = TextSecondary
                     )
                     Text(
-                        text = "⚡ Turbo 8x Parallel Downloader · Auto Checkpoint Resume · Background RAM Preload",
+                        text = buildString {
+                            append("Hardware Profile: ${state.hardware.recommendedTier}")
+                            if (!state.loadedInRamModelId.isNullOrBlank()) {
+                                val hotName = state.allModels.find { it.id == state.loadedInRamModelId }?.name?.substringBefore(" (") ?: state.loadedInRamModelId
+                                append(" · Hot in RAM: $hotName (${state.loadedBackendLabel.ifBlank { "CPU" }})")
+                            }
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = EmeraldOk,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        text = "⚡ Turbo 8x Background Service · Adaptive RAM & Thermal Optimization Active",
                         style = MaterialTheme.typography.labelSmall,
                         color = SapphireBright,
                         fontWeight = FontWeight.Medium
@@ -462,7 +510,7 @@ fun ModelsHubTab(
                             val isLoadingInRam = state.loadingInRamModelId == spec.id
 
                             OutlinedButton(
-                                onClick = { if (downloadInfo == null) onToggleInstallModel(spec.id) },
+                                onClick = { if (downloadInfo == null) startDownloadWithBgNotification(spec.id) },
                                 border = BorderStroke(1.dp, if (isInstalled) EmeraldOk else if (partialPct != null) SapphirePulse else CardBorder),
                                 modifier = Modifier.testTag("install_offline_${spec.id}")
                             ) {

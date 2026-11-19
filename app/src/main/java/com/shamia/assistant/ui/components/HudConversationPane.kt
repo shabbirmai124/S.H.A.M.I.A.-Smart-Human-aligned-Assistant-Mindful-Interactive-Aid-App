@@ -310,13 +310,22 @@ fun HudConversationPane(
 
                     Spacer(modifier = Modifier.width(10.dp))
 
-                    // Active Model Pill Selector matching screenshot: [ ⚙️ GPT-OSS 20B (Ope... ]
+                    // Active Model Pill Selector with live RAM residency indicator
+                    val activeIsHotInRam = state.selectedModel.isBuiltInOffline || state.loadedInRamModelId == state.selectedModelId
+                    val activeIsLoadingRam = state.loadingInRamModelId == state.selectedModelId
                     Box {
                         Surface(
                             onClick = onToggleModelDropdown,
                             shape = RoundedCornerShape(12.dp),
                             color = CardSlate,
-                            border = BorderStroke(1.dp, CardBorder),
+                            border = BorderStroke(
+                                1.dp,
+                                when {
+                                    activeIsHotInRam && !state.selectedModel.isBuiltInOffline -> EmeraldOk.copy(alpha = 0.55f)
+                                    activeIsLoadingRam -> SapphirePulse
+                                    else -> CardBorder
+                                }
+                            ),
                             modifier = Modifier.testTag("active_model_dropdown_button")
                         ) {
                             Row(
@@ -326,7 +335,10 @@ fun HudConversationPane(
                                 Icon(
                                     imageVector = Icons.Filled.Memory,
                                     contentDescription = "Select AI Model",
-                                    tint = SapphirePulse,
+                                    tint = when {
+                                        activeIsHotInRam && !state.selectedModel.isBuiltInOffline -> EmeraldOk
+                                        else -> SapphirePulse
+                                    },
                                     modifier = Modifier.size(16.dp)
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
@@ -349,6 +361,9 @@ fun HudConversationPane(
                             state.allModels.forEach { spec ->
                                 val isSelected = spec.id == state.selectedModelId
                                 val isSafe = state.isModelSafeForDevice(spec)
+                                val isInstalled = state.installedModelIds.contains(spec.id)
+                                val isHot = state.loadedInRamModelId == spec.id
+                                val isLoading = state.loadingInRamModelId == spec.id
                                 DropdownMenuItem(
                                     text = {
                                         Column {
@@ -358,9 +373,21 @@ fun HudConversationPane(
                                                 fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
                                             )
                                             Text(
-                                                text = "${spec.sizeLabel} · ${spec.params} · ${if (isSafe) "Local Hardware Ready" else "Needs ${spec.minRamGb} GB RAM"}",
+                                                text = when {
+                                                    isHot -> "${spec.sizeLabel} · Ready in RAM (${state.loadedBackendLabel.ifBlank { "CPU" }})"
+                                                    isLoading -> "${spec.sizeLabel} · Loading into RAM..."
+                                                    spec.isBuiltInOffline -> "0 MB Built-In · Instant Offline"
+                                                    isInstalled -> "${spec.sizeLabel} · Downloaded Offline"
+                                                    isSafe -> "${spec.sizeLabel} · ${spec.params} · Local Hardware Ready"
+                                                    else -> "${spec.sizeLabel} · Needs ${spec.minRamGb} GB RAM"
+                                                },
                                                 style = MaterialTheme.typography.labelSmall,
-                                                color = if (isSafe) EmeraldOk else TextSecondary
+                                                color = when {
+                                                    isHot || isInstalled || spec.isBuiltInOffline -> EmeraldOk
+                                                    isLoading -> SapphireBright
+                                                    isSafe -> TextSecondary
+                                                    else -> RoseDeny
+                                                }
                                             )
                                         }
                                     },
