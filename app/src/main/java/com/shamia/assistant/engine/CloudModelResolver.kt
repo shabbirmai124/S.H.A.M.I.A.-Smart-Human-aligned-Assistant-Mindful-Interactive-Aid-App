@@ -57,18 +57,21 @@ internal object CloudModelResolver {
         executedBackendId: String
     ): String {
         val ownerName = identity.fullName.trim().ifEmpty { "Md Shabbir Mia" }
-        var cleaned = WebSearchClient.decodeHtmlEntities(rawText.trim())
+        var cleaned = WebSearchClient.decodeHtmlEntities(rawText.trim(), collapseNewlines = false)
 
-        // Remove any leading bracketed model/backend debug tag so the user gets a pure human response
+        // Remove any leading bracketed model/backend debug tag or Termux pull instructions
         cleaned = cleaned
             .replace(Regex("^\\s*\\[(?:Active\\s+)?Model:[^\\]]+\\]\\s*", RegexOption.IGNORE_CASE), "")
             .replace(Regex("^\\s*\\[[^\\]]*?(?:Offline Core|ID:\\s*offline-core|DeepSeek\\s*2B|Web Grounded Fallback|Local Mode)[^\\]]*\\]\\s*", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("For full .*? inference offline in Termux.*?`\\.", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("For full .*? inference offline in Termux.*", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("Live Google & Web Search found for you[^:]*:\\s*", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("Here is what live open web search found[^:]*:\\s*", RegexOption.IGNORE_CASE), "")
             .trim()
 
         if (!activeSpec.isBuiltInOffline && activeSpec.id != "offline-core") {
             cleaned = cleaned
                 .replace("DeepSeek 2B · S.H.A.M.I.A. Offline Core", activeSpec.name, ignoreCase = true)
+                .replace("S.H.A.M.I.A. Offline Core", activeSpec.name, ignoreCase = true)
                 .replace("DeepSeek 2B", activeSpec.name, ignoreCase = true)
                 .replace("`offline-core`", "`${activeSpec.id}`", ignoreCase = true)
                 .replace("(model ID: offline-core)", "(model ID: `${activeSpec.id}`)", ignoreCase = true)

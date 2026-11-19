@@ -337,7 +337,9 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
                     ollamaEndpoint = _ui.value.ollamaEndpoint,
                     serverBaseUrl = _ui.value.serverBaseUrl,
                     useResearch = shouldSearch,
-                    isOnline = _ui.value.telemetry.isOnline
+                    isOnline = _ui.value.telemetry.isOnline,
+                    isInstalledLocally = _ui.value.installedModelIds.contains(activeSpec.id) ||
+                        OpenSourceAiRepository.isModelCachedOnDevice(getApplication(), activeSpec.id)
                 )
             }
 

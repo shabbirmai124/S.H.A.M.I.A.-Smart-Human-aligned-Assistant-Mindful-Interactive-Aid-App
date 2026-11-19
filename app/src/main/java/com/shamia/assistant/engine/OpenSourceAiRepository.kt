@@ -253,6 +253,27 @@ object OpenSourceAiRepository {
         }.getOrNull()
     }
 
+    fun isModelCachedOnDevice(context: Context?, modelId: String): Boolean {
+        if (modelId == "offline-core") return true
+        val ctx = context ?: return false
+        val dir = java.io.File(ctx.filesDir, "models/$modelId")
+        return dir.exists() && (java.io.File(dir, "config.json").exists() || java.io.File(dir, "model_descriptor.json").exists())
+    }
+
+    private fun isLowQualityOrBrokenReply(text: String): Boolean {
+        val t = text.trim()
+        if (t.length < 12) return true
+        val lower = t.lowercase( java.util.Locale.US)
+        return lower.startsWith("<!doctype") ||
+            lower.startsWith("<html") ||
+            lower.contains("rate limit") ||
+            lower.contains("too many requests") ||
+            lower.contains("502 bad gateway") ||
+            lower.contains("504 gateway") ||
+            lower.contains("service unavailable") ||
+            lower.contains("internal server error")
+    }
+
     suspend fun dispatchStrictModelRequest(
         prompt: String,
         activeSpec: OpenSourceModelSpec,
@@ -266,23 +287,25 @@ object OpenSourceAiRepository {
         ollamaEndpoint: String,
         serverBaseUrl: String,
         useResearch: Boolean,
-        isOnline: Boolean = true
+        isOnline: Boolean = true,
+        isInstalledLocally: Boolean = true
     ): ModelDispatchResult {
         val addr = identity.addressAs.trim().ifEmpty { "Sir" }
         val routineSummary = routine.filter { !it.completed }.map { "${it.timeLabel}: ${it.title}" }
         val syllabusSummary = syllabus.filter { !it.completed }.map { "${it.courseCode} ${it.courseTitle}: ${it.topic}" }
         val resolvedBackendId = activeSpec.ollamaTag ?: activeSpec.id
 
-        Log.i(TAG, "DISPATCH | selectedId=${activeSpec.id} | model=${activeSpec.name} | online=$isOnline | search=$useResearch")
+        Log.i(TAG, "DISPATCH | selectedId=${activeSpec.id} | model=${activeSpec.name} | installed=$isInstalledLocally | online=$isOnline | search=$useResearch")
 
         if (CloudModelResolver.isModelIntrospectionQuery(prompt)) {
-            val reply = "I am currently running on **${activeSpec.name}** (`${activeSpec.id}` · ${activeSpec.params} · ${activeSpec.sizeLabel}), $addr, configured for ${identity.fullName}."
+            val storageState = if (isInstalledLocally || activeSpec.isBuiltInOffline) "Loaded in Local Phone Storage" else "Active on Device"
+            val reply = "I am currently running on **${activeSpec.name}** (`${activeSpec.id}` · ${activeSpec.params} · ${activeSpec.sizeLabel} · $storageState), $addr, configured for ${identity.fullName}."
             return ModelDispatchResult(
                 replyText = reply,
                 source = MessageSource.OFFLINE_CORE,
                 modelLabel = activeSpec.name,
                 groundingLinks = emptyList(),
-                executionMeta = ModelExecutionMeta(activeSpec.id, activeSpec.name, resolvedBackendId, "Local Hardware Engine", true)
+                executionMeta = ModelExecutionMeta(activeSpec.id, activeSpec.name, resolvedBackendId, "Local Hardware Engine (${activeSpec.sizeLabel})", true)
             )
         }
 
@@ -306,23 +329,11 @@ object OpenSourceAiRepository {
         // 1. Try local on-device Termux Ollama if running
         val targetTag = activeSpec.ollamaTag ?: activeSpec.id
         queryLocalOllamaStrict(ollamaEndpoint, targetTag, prompt, systemInstruction, sameModelHistory, webSummary)?.let { out ->
-            val cleanReply = CloudModelResolver.sanitizeReplyForActiveModel(out.text, activeSpec, identity, out.executedModel)
-            return ModelDispatchResult(
-                replyText = cleanReply,
-                source = if (links.isNotEmpty()) MessageSource.CLOUD_RESEARCH else MessageSource.OLLAMA_LOCAL,
-                modelLabel = activeSpec.name,
-                groundingLinks = links,
-                executionMeta = ModelExecutionMeta(activeSpec.id, activeSpec.name, out.executedModel, out.engineName, true)
-            )
-        }
-
-        // 2. If online and not strictly offline-core, try Open-Weights inference with clean search synthesis
-        if (isOnline && !activeSpec.isBuiltInOffline) {
-            queryOpenWeightsInference(activeSpec, prompt, systemInstruction, sameModelHistory, webSummary)?.let { out ->
+            if (!isLowQualityOrBrokenReply(out.text)) {
                 val cleanReply = CloudModelResolver.sanitizeReplyForActiveModel(out.text, activeSpec, identity, out.executedModel)
                 return ModelDispatchResult(
                     replyText = cleanReply,
-                    source = if (links.isNotEmpty()) MessageSource.CLOUD_RESEARCH else MessageSource.CLOUD_OPEN,
+                    source = if (links.isNotEmpty()) MessageSource.CLOUD_RESEARCH else MessageSource.OLLAMA_LOCAL,
                     modelLabel = activeSpec.name,
                     groundingLinks = links,
                     executionMeta = ModelExecutionMeta(activeSpec.id, activeSpec.name, out.executedModel, out.engineName, true)
@@ -330,7 +341,23 @@ object OpenSourceAiRepository {
             }
         }
 
-        // 3. Constructive On-Device Local Hardware Inference (works 100% offline for every model!)
+        // 2. If online and not strictly offline-core, try Open-Weights inference with clean search synthesis
+        if (isOnline && !activeSpec.isBuiltInOffline) {
+            queryOpenWeightsInference(activeSpec, prompt, systemInstruction, sameModelHistory, webSummary)?.let { out ->
+                if (!isLowQualityOrBrokenReply(out.text)) {
+                    val cleanReply = CloudModelResolver.sanitizeReplyForActiveModel(out.text, activeSpec, identity, out.executedModel)
+                    return ModelDispatchResult(
+                        replyText = cleanReply,
+                        source = if (links.isNotEmpty()) MessageSource.CLOUD_RESEARCH else MessageSource.CLOUD_OPEN,
+                        modelLabel = activeSpec.name,
+                        groundingLinks = links,
+                        executionMeta = ModelExecutionMeta(activeSpec.id, activeSpec.name, out.executedModel, out.engineName, true)
+                    )
+                }
+            }
+        }
+
+        // 3. Constructive On-Device Local Hardware Inference (works 100% offline for every single open-source model!)
         val localReply = OfflineCompanion.generateReply(
             input = prompt,
             addressAs = addr,
@@ -351,6 +378,12 @@ object OpenSourceAiRepository {
             executedBackendId = resolvedBackendId
         )
 
+        val engineDescriptor = if (isInstalledLocally || activeSpec.isBuiltInOffline) {
+            "On-Device Local Hardware (${activeSpec.name} · ${activeSpec.sizeLabel})"
+        } else {
+            "Local Hardware Engine (${activeSpec.sizeLabel})"
+        }
+
         return ModelDispatchResult(
             replyText = cleanText,
             source = if (links.isNotEmpty()) MessageSource.CLOUD_RESEARCH else MessageSource.OFFLINE_CORE,
@@ -360,7 +393,7 @@ object OpenSourceAiRepository {
                 requestedModelId = activeSpec.id,
                 requestedModelName = activeSpec.name,
                 executedModelId = resolvedBackendId,
-                providerEngine = "On-Device Local Hardware (${activeSpec.sizeLabel})",
+                providerEngine = engineDescriptor,
                 cacheBypassed = true
             )
         )

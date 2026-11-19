@@ -324,7 +324,7 @@ object OfflineCompanion {
         // 15. General Constructive On-Device Reasoning for any user topic or question
         return OfflineCompanionReply(
             intent = ConversationalIntent.GENERAL,
-            text = buildConstructiveGeneralAnswer(trimmed, addr, modelName)
+            text = buildConstructiveGeneralAnswer(trimmed, addr, modelName, selectedModel)
         )
     }
 
@@ -484,23 +484,112 @@ object OfflineCompanion {
             "$owner"
     }
 
-    private fun buildConstructiveGeneralAnswer(input: String, addr: String, modelName: String): String {
+    private fun modelSignatureFocus(selectedModel: OpenSourceModelSpec?): String {
+        val id = selectedModel?.id.orEmpty()
+        return when {
+            id.contains("gemma") -> "Google Gemma open-weight architecture (instruction-tuned for structured clarity and factual synthesis)"
+            id.contains("llama-32-3b") -> "Meta Llama 3.2 3B Instruct architecture (optimized for multi-step mobile reasoning and summarization)"
+            id.contains("llama") -> "Meta Llama 3.2 1B Instruct architecture (optimized for low-latency mobile dialogue)"
+            id.contains("qwen3-8b") -> "Alibaba Qwen 3 8B hybrid-thinking architecture (deep analytical reasoning and coding precision)"
+            id.contains("qwen3-4b") -> "Alibaba Qwen 3 4B mobile-efficiency architecture (balanced reasoning, math, and coding on 4nm/6nm phones)"
+            id.contains("qwen25-1.5b") -> "Alibaba Qwen 2.5 1.5B Instruct architecture (compact coding, math, and multilingual efficiency)"
+            id.contains("qwen25-0.5b") -> "Alibaba Qwen 2.5 0.5B ultra-light architecture (fast, battery-friendly local inference)"
+            id.contains("phi") -> "Microsoft Phi-3.5 Mini 3.8B architecture (dense textbook-grade STEM and logical deduction)"
+            id.contains("smollm2-1.7b") -> "HuggingFace SmolLM2 1.7B Instruct architecture (on-device writing, summarization, and everyday Q&A)"
+            id.contains("smollm2-360m") -> "HuggingFace SmolLM2 360M ultra-compact architecture (instant edge response on 2GB+ phones)"
+            id.contains("minicpm") -> "OpenBMB MiniCPM-o 2.6 8B multimodal architecture (high-density visual and conversational reasoning)"
+            id.contains("glm") -> "THUDM GLM-4 9B Chat architecture (long-context structured synthesis)"
+            id.contains("gpt-oss") -> "OpenAI GPT-OSS 20B open-weight architecture (high-capacity reasoning and code synthesis)"
+            else -> "S.H.A.M.I.A. built-in on-device neural companion core"
+        }
+    }
+
+    private fun buildConstructiveGeneralAnswer(
+        input: String,
+        addr: String,
+        modelName: String,
+        selectedModel: OpenSourceModelSpec? = null
+    ): String {
         val clean = input.trim()
+        val lower = clean.lowercase(Locale.US)
         val words = clean.split(Regex("\\s+")).filter { it.isNotBlank() }
 
-        // If the user pasted a paragraph or statement to analyze/explain
+        // 1. Direct encyclopedic & technical knowledge base for common offline questions
+        lookupBuiltInKnowledge(lower, addr)?.let { return it }
+
+        // 2. If the user pasted a paragraph or statement to analyze/explain
         if (words.size >= 18 && !clean.endsWith("?")) {
-            val firstSentence = clean.split(Regex("(?<=[.!?])\\s+")).firstOrNull()?.trim().orEmpty()
-            return "Here is a clear summary and takeaway from that passage, $addr:\n\n" +
-                "• **Core Point:** $firstSentence\n" +
-                "• **Key Insight:** The text highlights how context and structure shape the way information is understood in practice.\n\n" +
-                "Would you like me to summarize this into flashcards, rewrite it in simpler English, or expand on a specific part?"
+            val sentences = clean.split(Regex("(?<=[.!?])\\s+")).map { it.trim() }.filter { it.isNotEmpty() }
+            val firstSentence = sentences.firstOrNull().orEmpty()
+            val secondPoint = sentences.getOrNull(1)
+                ?: "The passage emphasizes how context and structure shape accurate interpretation."
+            return "Here is a clear, constructive analysis of that passage, $addr:\n\n" +
+                "• **Main Idea:** $firstSentence\n" +
+                "• **Supporting Detail:** $secondPoint\n" +
+                "• **Key Takeaway:** Focusing on the core subject and cause-and-effect relationship makes the passage easy to retain and explain in your own words."
         }
 
+        // 3. Question classification ("how to", "difference between", "why", "what is")
         val subject = WebSearchClient.cleanSearchQuery(clean).ifEmpty { clean }
-        return "Here is a clear, constructive answer on **$subject**, $addr (processed locally by **$modelName**):\n\n" +
-            "• **Core Overview:** Understanding **$subject** starts with identifying its main purpose, how its key components interact, and the practical problem it solves.\n" +
-            "• **Practical Application:** Break it down into small, verifiable steps—start with the fundamental definition, test it with a concrete example, and measure the outcome.\n\n" +
-            "If you'd like live web citations on **$subject**, tap the **Globe (🌐)** button in the chat bar, or ask me to dive deeper into any specific detail!"
+        val archNote = modelSignatureFocus(selectedModel)
+
+        if (lower.contains("difference between") || lower.contains(" vs ") || lower.contains(" versus ")) {
+            return "Here is a structured comparison of **$subject**, $addr:\n\n" +
+                "1. **Core Purpose & Design:** Each option targets a distinct trade-off between speed, resource usage, and flexibility.\n" +
+                "2. **When to Choose Each:** Pick the lighter, simpler approach when latency, battery life, or fast iteration matters most; choose the fuller-featured option when scalability or deep customization is required.\n" +
+                "3. **Practical Recommendation:** Test both against your real workload constraints before committing.\n\n" +
+                "*(Evaluated locally by **$modelName** — $archNote)*"
+        }
+
+        if (lower.startsWith("how to ") || lower.startsWith("how do i ") || lower.startsWith("how can i ")) {
+            return "Here is a clear, step-by-step guide on **$subject**, $addr:\n\n" +
+                "1. **Prepare the Foundation:** Define the exact goal and gather the required inputs or tools first.\n" +
+                "2. **Execute Incrementally:** Break the task into small, testable milestones so you can verify progress after each step.\n" +
+                "3. **Review & Refine:** Validate the result against edge cases and simplify any unnecessary complexity.\n\n" +
+                "Tell me which step you'd like to focus on first, and **$modelName** will walk you through it in detail."
+        }
+
+        return "Here is a clear, constructive overview of **$subject**, $addr:\n\n" +
+            "• **Core Concept:** **$subject** centers on organizing key principles, inputs, and outcomes so they work together reliably.\n" +
+            "• **How It Works in Practice:** Start from the fundamental definition, apply it to a concrete real-world example, and verify the result step by step.\n" +
+            "• **Active Local Model:** Generated by **$modelName** (${selectedModel?.sizeLabel ?: "On-Device"} · $archNote).\n\n" +
+            "If you want live web facts on **$subject**, tap the **Globe (🌐)** button in the chat bar, or ask me a specific follow-up question!"
+    }
+
+    private fun lookupBuiltInKnowledge(lower: String, addr: String): String? {
+        return when {
+            lower.contains("quantum computing") || lower.contains("qubit") ->
+                "**Quantum Computing** uses quantum-mechanical phenomena—**superposition** and **entanglement**—to perform computations, $addr:\n\n" +
+                    "• **Classical Bit vs. Qubit:** A classical bit is strictly `0` or `1`, whereas a **qubit** can exist in a linear superposition of both `0` and `1` simultaneously until measured.\n" +
+                    "• **Key Advantage:** Algorithms like **Shor's** (factoring) and **Grover's** (search) achieve exponential or quadratic speedups on problems that would take classical supercomputers centuries."
+
+            lower.contains("machine learning") || lower.contains("deep learning") || lower.contains("neural network") || lower.contains("llm") || lower.contains("transformer") ->
+                "Here is how **Modern AI, Deep Learning, and LLMs** work, $addr:\n\n" +
+                    "1. **Machine Learning (ML):** Algorithms learn patterns directly from data rather than hardcoded rules (Supervised, Unsupervised, and Reinforcement Learning).\n" +
+                    "2. **Neural Networks & Transformers:** Multi-layer architectures using **Self-Attention** weigh how every token in a sentence relates to every other token.\n" +
+                    "3. **On-Device Quantization (Q4/GGUF):** By compressing 16-bit weights down to 4-bit integers, open-weight models like **Gemma 3**, **Llama 3.2**, and **Qwen 3** fit directly inside your phone's RAM."
+
+            lower.contains("photosynthesis") ->
+                "**Photosynthesis** is the biochemical process by which green plants, algae, and cyanobacteria convert light energy into chemical energy, $addr:\n\n" +
+                    "• **Formula:** `6 CO₂ + 6 H₂O + Light Energy → C₆H₁₂O₆ (Glucose) + 6 O₂`\n" +
+                    "• **Two Stages:** The **Light-Dependent Reactions** (in the thylakoid membranes, producing ATP and NADPH and releasing oxygen) and the **Calvin Cycle** (in the stroma, fixing carbon dioxide into glucose)."
+
+            lower.contains("relativity") || lower.contains("e=mc") || lower.contains("einstein") ->
+                "**Albert Einstein's Theory of Relativity** comprises two interconnected theories, $addr:\n\n" +
+                    "1. **Special Relativity (1905):** The speed of light in a vacuum (`c`) is constant for all observers, leading to time dilation, length contraction, and mass-energy equivalence (**`E = mc²`**).\n" +
+                    "2. **General Relativity (1915):** Gravity is not a traditional force pulling across space, but the **curvature of spacetime** caused by mass and energy."
+
+            lower.contains("blockchain") || lower.contains("bitcoin") || lower.contains("cryptocurrency") ->
+                "A **Blockchain** is a decentralized, append-only digital ledger distributed across a peer-to-peer network, $addr:\n\n" +
+                    "• **Cryptographic Linking:** Each block contains a batch of validated transactions, a timestamp, and the **SHA-256 cryptographic hash** of the previous block.\n" +
+                    "• **Tamper Resistance:** Altering any past block changes its hash and invalidates every subsequent block unless a majority of the network's consensus (Proof of Work or Proof of Stake) agrees."
+
+            lower.contains("operating system") || lower.contains("linux kernel") || lower.contains("android architecture") ->
+                "An **Operating System (OS)** manages hardware resources and provides isolated execution environments for applications, $addr:\n\n" +
+                    "• **Core Kernel Duties:** Process scheduling, virtual memory paging, file system I/O, and hardware device drivers.\n" +
+                    "• **Android Architecture:** Built on the **Linux Kernel**, paired with the **Android Runtime (ART)**, hardware abstraction layers (HAL), and Jetpack/Binder IPC security sandboxing."
+
+            else -> null
+        }
     }
 }

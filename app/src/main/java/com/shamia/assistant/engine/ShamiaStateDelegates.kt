@@ -43,11 +43,15 @@ internal object ShamiaStateDelegates {
             }
             ui.update { cur ->
                 val nextIds = if (ok) cur.installedModelIds + modelId else cur.installedModelIds
-                if (ok) store.saveInstalledModelIds(nextIds)
+                if (ok) {
+                    store.saveInstalledModelIds(nextIds)
+                    store.saveSelectedModelId(spec.id)
+                }
                 cur.copy(
                     installedModelIds = nextIds,
+                    selectedModelId = if (ok) spec.id else cur.selectedModelId,
                     modelDownloadProgress = cur.modelDownloadProgress - modelId,
-                    statusBanner = if (ok) "${spec.name} installed for offline use." else "Offline install cancelled."
+                    statusBanner = if (ok) "${spec.name} (${spec.sizeLabel}) downloaded & active on phone." else "Offline install cancelled."
                 )
             }
         }

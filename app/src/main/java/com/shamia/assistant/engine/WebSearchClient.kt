@@ -17,15 +17,17 @@ object WebSearchClient {
     private const val USER_AGENT =
         "Mozilla/5.0 (Linux; Android 15; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 
-    fun decodeHtmlEntities(input: String): String {
+    fun decodeHtmlEntities(input: String, collapseNewlines: Boolean = true): String {
         if (input.isEmpty()) return ""
         var text = input
+            .replace(Regex("<br\\s*/?>", RegexOption.IGNORE_CASE), if (collapseNewlines) " " else "\n")
             .replace(Regex("<[^>]+>"), " ")
             .replace("&quot;", "\"", ignoreCase = true)
             .replace("&ldquo;", "\"", ignoreCase = true)
             .replace("&rdquo;", "\"", ignoreCase = true)
             .replace("&#39;", "'", ignoreCase = true)
             .replace("&#039;", "'", ignoreCase = true)
+            .replace("&#x27;", "'", ignoreCase = true)
             .replace("&apos;", "'", ignoreCase = true)
             .replace("&lsquo;", "'", ignoreCase = true)
             .replace("&rsquo;", "'", ignoreCase = true)
@@ -35,6 +37,7 @@ object WebSearchClient {
             .replace("&nbsp;", " ", ignoreCase = true)
             .replace("&ndash;", "–", ignoreCase = true)
             .replace("&mdash;", "—", ignoreCase = true)
+            .replace("&hellip;", "…", ignoreCase = true)
             .replace("&#8211;", "–")
             .replace("&#8212;", "—")
             .replace("&#8217;", "'")
@@ -45,7 +48,18 @@ object WebSearchClient {
             val code = m.groupValues[1].toIntOrNull()
             if (code != null && code in 32..65535) code.toChar().toString() else ""
         }
-        return text.replace(Regex("\\s+"), " ").trim()
+        text = Regex("&#x([0-9a-fA-F]+);").replace(text) { m ->
+            val code = m.groupValues[1].toIntOrNull(16)
+            if (code != null && code in 32..65535) code.toChar().toString() else ""
+        }
+        return if (collapseNewlines) {
+            text.replace(Regex("\\s+"), " ").trim()
+        } else {
+            text.lines()
+                .joinToString("\n") { line -> line.replace(Regex("[ \\t]+"), " ").trimEnd() }
+                .replace(Regex("\\n{3,}"), "\n\n")
+                .trim()
+        }
     }
 
     fun cleanSearchQuery(raw: String): String {
