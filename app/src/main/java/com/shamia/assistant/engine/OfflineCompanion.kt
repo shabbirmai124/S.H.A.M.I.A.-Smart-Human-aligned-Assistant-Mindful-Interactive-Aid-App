@@ -436,7 +436,7 @@ object OfflineCompanion {
     private fun buildCodingResponse(input: String, lower: String, addr: String): String {
         return when {
             lower.contains("binary search") ->
-                "Here is a clean, O(log n) **Binary Search** implementation and explanation, $addr:\n\n" +
+                "Here is a clean, O(log n) **Binary Search** implementation, $addr:\n\n" +
                     "```kotlin\n" +
                     "fun binarySearch(arr: IntArray, target: Int): Int {\n" +
                     "    var low = 0\n" +
@@ -452,20 +452,65 @@ object OfflineCompanion {
                     "    return -1\n" +
                     "}\n" +
                     "```\n" +
-                    "• **Time Complexity:** `O(log n)` because each comparison halves the search space.\n" +
+                    "• **Time Complexity:** `O(log n)` because each step cuts the remaining search range in half.\n" +
                     "• **Space Complexity:** `O(1)` iterative."
 
+            lower.contains("fibonacci") ->
+                "Here is an optimal `O(n)` time, `O(1)` space **Fibonacci** implementation, $addr:\n\n" +
+                    "```kotlin\n" +
+                    "fun fibonacci(n: Int): Long {\n" +
+                    "    if (n <= 1) return n.toLong()\n" +
+                    "    var prev = 0L\n" +
+                    "    var curr = 1L\n" +
+                    "    for (i in 2..n) {\n" +
+                    "        val next = prev + curr\n" +
+                    "        prev = curr\n" +
+                    "        curr = next\n" +
+                    "    }\n" +
+                    "    return curr\n" +
+                    "}\n" +
+                    "```"
+
+            lower.contains("prime") ->
+                "Here is an efficient `O(√n)` **Prime Number Check**, $addr:\n\n" +
+                    "```kotlin\n" +
+                    "fun isPrime(n: Int): Boolean {\n" +
+                    "    if (n < 2) return false\n" +
+                    "    if (n == 2 || n == 3) return true\n" +
+                    "    if (n % 2 == 0 || n % 3 == 0) return false\n" +
+                    "    var i = 5\n" +
+                    "    while (i * i <= n) {\n" +
+                    "        if (n % i == 0 || n % (i + 2) == 0) return false\n" +
+                    "        i += 6\n" +
+                    "    }\n" +
+                    "    return true\n" +
+                    "}\n" +
+                    "```"
+
+            lower.contains("sort") || lower.contains("quicksort") || lower.contains("mergesort") ->
+                "Here is a clean **QuickSort** implementation (`O(n log n)` average time), $addr:\n\n" +
+                    "```kotlin\n" +
+                    "fun quickSort(list: List<Int>): List<Int> {\n" +
+                    "    if (list.size <= 1) return list\n" +
+                    "    val pivot = list[list.size / 2]\n" +
+                    "    val less = list.filter { it < pivot }\n" +
+                    "    val equal = list.filter { it == pivot }\n" +
+                    "    val greater = list.filter { it > pivot }\n" +
+                    "    return quickSort(less) + equal + quickSort(greater)\n" +
+                    "}\n" +
+                    "```"
+
             lower.contains("dynamic programming") ->
-                "**Dynamic Programming (DP)** solves complex problems by breaking them into overlapping subproblems and caching each subproblem's result, $addr:\n\n" +
-                    "1. **Top-Down (Memoization):** Recursive function + hash map or array cache.\n" +
-                    "2. **Bottom-Up (Tabulation):** Iteratively fill a DP table from base cases upward (often reducing space from `O(n)` to `O(1)`)."
+                "**Dynamic Programming (DP)** solves optimization and counting problems by caching results of overlapping subproblems, $addr:\n\n" +
+                    "1. **Top-Down (Memoization):** Write the natural recurrence recursively and store solved states in a hash map or array.\n" +
+                    "2. **Bottom-Up (Tabulation):** Fill a DP table iteratively from base cases upward (often reducing memory from `O(n)` to `O(1)`)."
 
             else ->
-                "Here is a structured software engineering approach for **\"${input.take(70)}\"**, $addr:\n\n" +
-                    "1. **Clarify Inputs & Edge Cases:** Validate null/empty inputs and define the exact return type.\n" +
-                    "2. **Keep Logic Pure & Modular:** Separate state management from UI or I/O so each function is easy to test.\n" +
-                    "3. **Optimize Complexity:** Prefer `HashMap`/`HashSet` for `O(1)` lookups and avoid nested `O(n²)` loops on large lists.\n\n" +
-                    "Tell me the exact function or language you'd like, and I will write out the code for you."
+                "Here is a clean engineering checklist for **\"${input.take(70)}\"**, $addr:\n\n" +
+                    "1. **Define Exact Inputs & Edge Cases:** Guard against null, empty collections, and boundary values up front.\n" +
+                    "2. **Separate Logic from UI / I/O:** Keep core algorithms in pure functions so they are fast to debug and unit test.\n" +
+                    "3. **Watch Complexity:** Use `HashMap`/`HashSet` for `O(1)` lookups instead of nested `O(n²)` scans.\n\n" +
+                    "Specify the exact function, language (Kotlin, Python, JavaScript, C++, or SQL), and expected input/output and I will write it out directly."
         }
     }
 
@@ -484,7 +529,7 @@ object OfflineCompanion {
             "$owner"
     }
 
-    private fun isLikelyKeyboardSmashOrTypo(text: String): Boolean {
+    internal fun isLikelyKeyboardSmashOrTypo(text: String): Boolean {
         val clean = text.trim()
         if (clean.isEmpty()) return true
         // Repeated same character 3+ times in a row (e.g. "rerdddd", "aaaaa", "asdfgh")
@@ -590,6 +635,27 @@ object OfflineCompanion {
                     "1. **DNS Resolution:** Translates a human-readable domain name into a numerical IP address.\n" +
                     "2. **TCP/IP & TLS Handshake:** Establishes a reliable packet-switched connection and negotiates end-to-end encryption keys.\n" +
                     "3. **HTTP/HTTPS Request & Response:** Exchanges structured headers and payloads (JSON, HTML, or media) securely between client and server."
+
+            lower.contains("nemotron") || lower.contains("nvidia") ->
+                "**NVIDIA Nemotron** is NVIDIA's family of open-weight language models pruned and distilled for high efficiency, strong instruction following, and edge/on-device deployment, $addr:\n\n" +
+                    "• **Nemotron Mini 4B Instruct:** A compact 4B parameter model trained via NVIDIA's Minitron pruning and distillation pipeline, excelling at fast on-device roleplay, RAG, and function calling.\n" +
+                    "• **Llama-3.1-Nemotron-Nano-8B:** An 8B reasoning-optimized open model offering high accuracy on coding, math, and complex multi-step tasks while fitting on 8GB+ hardware."
+
+            lower.contains("newton") || lower.contains("laws of motion") ->
+                "**Isaac Newton's Three Laws of Motion** form the foundation of classical mechanics, $addr:\n\n" +
+                    "1. **First Law (Inertia):** An object stays at rest or in uniform motion unless acted on by a net external force.\n" +
+                    "2. **Second Law (`F = ma`):** Force equals mass multiplied by acceleration.\n" +
+                    "3. **Third Law (Action-Reaction):** Every action has an equal and opposite reaction."
+
+            lower.contains("sql") && lower.contains("nosql") || lower.contains("database") ->
+                "Here is how **SQL (Relational)** and **NoSQL (Non-Relational)** databases differ, $addr:\n\n" +
+                    "• **SQL (PostgreSQL, SQLite/Room, MySQL):** Uses structured tables, strict schemas, foreign-key joins, and full ACID transactions—ideal for financial, relational, and structured local records.\n" +
+                    "• **NoSQL (Firestore, MongoDB, Redis):** Uses flexible documents, key-value pairs, or graphs for rapid horizontal scaling and nested JSON-like data."
+
+            lower.contains("encryption") || lower.contains("cybersecurity") || lower.contains("aes") ->
+                "**Modern Encryption** protects private data in transit and at rest, $addr:\n\n" +
+                    "• **Symmetric Encryption (AES-256-GCM):** Uses a single shared secret key for ultra-fast authenticated encryption of local files and databases.\n" +
+                    "• **Asymmetric Encryption (RSA / Ed25519 / ECDH):** Uses a public/private key pair for digital signatures and secure TLS handshakes."
 
             else -> null
         }

@@ -31,11 +31,11 @@ object ModelDownloadManager {
         hardware: DeviceHardwareSpec,
         models: List<OpenSourceModelSpec>
     ): OpenSourceModelSpec {
+        // Recommend the best hardware-compatible ungated 1-tap LiteRT download for the phone's RAM
         val ram = hardware.ramGb
         val preferredId = when {
             hardware.isLowMemory || ram < 2 -> "offline-core"
             ram < 3 -> "qwen25-0.5b-webgpu"
-            ram < 6 -> "qwen25-1.5b-edge"
             else -> "qwen25-1.5b-edge"
         }
         return models.find { it.id == preferredId }
@@ -67,15 +67,17 @@ object ModelDownloadManager {
                 val obj = arr.optJSONObject(i) ?: continue
                 val path = obj.optString("path")
                 val size = obj.optLong("size", 0L)
-                if (path.endsWith(".task", ignoreCase = true) && size > 10L * 1024L * 1024L) {
+                val isBundle = path.endsWith(".task", ignoreCase = true) || path.endsWith(".litertlm", ignoreCase = true)
+                if (isBundle && size > 10L * 1024L * 1024L) {
                     candidates.add(path to size)
                 }
             }
             if (candidates.isEmpty()) return@runCatching null
 
-            // Prefer mobile-friendly q4/q8 multi-prefill or ekv4096/ekv1280 smallest viable bundle
+            // Prefer .task (universal MediaPipe compatibility), then mobile-friendly q4/q8 multi-prefill smallest bundle
             candidates.sortedWith(
                 compareBy<Pair<String, Long>>(
+                    { if (it.first.endsWith(".task", ignoreCase = true)) 0 else 1 },
                     { if (it.first.contains("multi-prefill", ignoreCase = true)) 0 else 1 },
                     { if (it.first.contains("q4", ignoreCase = true) || it.first.contains("int4", ignoreCase = true)) 0 else 1 },
                     { it.second }
@@ -159,22 +161,25 @@ object ModelDownloadManager {
                     onProgress = onProgress
                 )
                 if (dlResult.first) {
+                    val fingerprint = OnDeviceLlmEngine.computeFastFingerprint(finalFile)
                     File(dir, "model_descriptor.json").writeText(
                         JSONObject()
                             .put("id", spec.id)
                             .put("name", spec.name)
                             .put("hfRepo", repo)
+                            .put("source", "huggingface_direct")
                             .put("weightsFile", finalFile.name)
                             .put("bytes", finalFile.length())
+                            .put("sha256Prefix", fingerprint)
                             .put("installedAtEpochMs", System.currentTimeMillis())
                             .toString()
                     )
-                    return@withContext true to "${spec.name} (${finalFile.length() / (1024 * 1024)} MB) ready for 100% offline execution."
+                    return@withContext true to "${spec.name} (${finalFile.length() / (1024 * 1024)} MB · verified) ready for 100% offline execution."
                 } else {
                     return@withContext false to dlResult.second
                 }
             } else {
-                return@withContext false to "This repo requires Hugging Face license approval or local Ollama. Try Qwen 2.5 0.5B, Qwen 2.5 1.5B, SmolLM 135M, DeepSeek-R1 1.5B, or Phi-4 Mini for instant 1-tap offline download."
+                return@withContext false to "${spec.name} does not host a public ungated .task bundle on Hugging Face. Tap 'Import .task' to load its local weights file, or pull '${spec.ollamaTag}' in local Ollama."
             }
         }
 
@@ -292,8 +297,21 @@ object ModelDownloadManager {
                 target.delete()
                 return@withContext false to "Selected file is too small to be a valid .task model bundle."
             }
+            val fingerprint = OnDeviceLlmEngine.computeFastFingerprint(target)
+            File(dir, "model_descriptor.json").writeText(
+                JSONObject()
+                    .put("id", spec.id)
+                    .put("name", spec.name)
+                    .put("hfRepo", spec.hfRepo ?: "")
+                    .put("source", "local_import")
+                    .put("weightsFile", target.name)
+                    .put("bytes", target.length())
+                    .put("sha256Prefix", fingerprint)
+                    .put("installedAtEpochMs", System.currentTimeMillis())
+                    .toString()
+            )
             onProgress(100, "${spec.name} imported (${target.length() / (1024 * 1024)} MB)")
-            true to "${spec.name} imported for 100% offline execution."
+            true to "${spec.name} (${target.length() / (1024 * 1024)} MB · verified) imported for 100% offline execution."
         } catch (e: Exception) {
             runCatching { target.delete() }
             false to "Import failed: ${e.message}"

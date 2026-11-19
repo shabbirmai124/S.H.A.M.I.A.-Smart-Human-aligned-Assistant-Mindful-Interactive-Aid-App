@@ -29,7 +29,7 @@ class RoutineSyllabusStore(context: Context) {
             .apply()
     }
 
-    fun loadSelectedModelId(): String = prefs.getString("selected_model_id", "gemma-3-free") ?: "gemma-3-free"
+    fun loadSelectedModelId(): String = prefs.getString("selected_model_id", "offline-core") ?: "offline-core"
     fun saveSelectedModelId(id: String) = prefs.edit().putString("selected_model_id", id).apply()
 
     fun loadEnsembleEnabled(): Boolean = prefs.getBoolean("ensemble_enabled", false)
@@ -37,11 +37,11 @@ class RoutineSyllabusStore(context: Context) {
 
     fun loadEnsembleIds(): List<String> {
         val raw = prefs.getString("ensemble_ids", null)
-        if (raw.isNullOrBlank()) return listOf("gemma-3-free", "llama-32-free", "qwen25-1.5b-edge")
+        if (raw.isNullOrBlank()) return listOf("qwen25-0.5b-webgpu", "qwen25-1.5b-edge", "nvidia-nemotron-mini-4b")
         return runCatching {
             val arr = JSONArray(raw)
             (0 until arr.length()).map { arr.getString(it) }
-        }.getOrDefault(listOf("gemma-3-free", "llama-32-free", "qwen25-1.5b-edge"))
+        }.getOrDefault(listOf("qwen25-0.5b-webgpu", "qwen25-1.5b-edge", "nvidia-nemotron-mini-4b"))
     }
 
     fun saveEnsembleIds(ids: List<String>) {

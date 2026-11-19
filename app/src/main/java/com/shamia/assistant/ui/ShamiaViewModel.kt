@@ -1,6 +1,7 @@
 package com.shamia.assistant.ui
 
 import android.app.Application
+import android.net.Uri
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -190,12 +191,14 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun startNewChatWithModel(modelId: String) {
+        OnDeviceLlmEngine.cancelGeneration()
         generationJob?.cancel()
         generationJob = null
         streamingMessageId = null
         voiceEngine.stopSpeaking()
         val chosen = _ui.value.allModels.find { it.id == modelId } ?: _ui.value.selectedModel
         store.saveSelectedModelId(chosen.id)
+        viewModelScope.launch { OnDeviceLlmEngine.unloadIfDifferent(chosen.id) }
         val freshSession = "session-${System.currentTimeMillis()}"
         _ui.update {
             it.copy(
@@ -213,7 +216,8 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
     fun selectModel(modelId: String) {
         val chosen = _ui.value.allModels.find { it.id == modelId } ?: return
         store.saveSelectedModelId(chosen.id)
-        Log.i("ShamiaModelRouter", "MODEL SWITCH -> id=${chosen.id}, name=${chosen.name}")
+        viewModelScope.launch { OnDeviceLlmEngine.unloadIfDifferent(chosen.id) }
+        Log.i("ShamiaModelRouter", "STRICT MODEL SWITCH -> id=${chosen.id}, name=${chosen.name}")
         _ui.update { state ->
             val updatedMessages = if (state.messages.size == 1 && state.messages.first().id.startsWith("welcome-")) {
                 listOf(buildWelcomeMessage(state.identity, chosen, state.chatSessionId))
@@ -316,6 +320,7 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
             var streamedNatively = false
             val result = if (_ui.value.ensembleEnabled) {
                 OpenSourceAiRepository.runEnsembleLocalAndWeb(
+                    context = getApplication(),
                     prompt = text,
                     identity = _ui.value.identity,
                     detectedIntent = intent,
@@ -362,7 +367,7 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
             }
 
             val (cleanText, extractedTip) = ShamiaPrompts.extractCoachingTip(result.replyText)
-            val fallbackTip = if (extractedTip == null && intent == ConversationalIntent.ENGLISH_TUTOR) {
+            val fallbackTip = if (extractedTip == null && result.executionMeta.verifiedExactModel && activeSpec.isBuiltInOffline && intent == ConversationalIntent.ENGLISH_TUTOR) {
                 OfflineCompanion.generateReply(text, addr, _ui.value.identity.fullName, _ui.value.routine, _ui.value.syllabus, activeSpec).coachingTip
             } else extractedTip
 
@@ -607,6 +612,9 @@ class ShamiaViewModel(application: Application) : AndroidViewModel(application) 
 
     fun toggleInstallModel(modelId: String) =
         ShamiaStateDelegates.installOrRemoveModel(getApplication(), viewModelScope, _ui, store, modelId)
+
+    fun importLocalModelFile(modelId: String, uri: Uri) =
+        ShamiaStateDelegates.importModelTaskFile(getApplication(), viewModelScope, _ui, store, modelId, uri)
 
     fun toggleInstallVoiceModel(voiceId: String) =
         ShamiaStateDelegates.installOrRemoveVoice(getApplication(), viewModelScope, _ui, store, voiceId)

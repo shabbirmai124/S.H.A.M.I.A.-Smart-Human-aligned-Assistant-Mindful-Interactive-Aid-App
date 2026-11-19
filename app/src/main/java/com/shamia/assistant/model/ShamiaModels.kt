@@ -150,7 +150,9 @@ data class ModelExecutionMeta(
     val requestedModelName: String,
     val executedModelId: String,
     val providerEngine: String,
-    val cacheBypassed: Boolean = true
+    val cacheBypassed: Boolean = true,
+    val verifiedExactModel: Boolean = false,
+    val verificationProof: String = ""
 )
 
 data class PendingAction(

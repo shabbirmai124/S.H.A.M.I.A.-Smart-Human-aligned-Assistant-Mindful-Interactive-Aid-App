@@ -1,5 +1,8 @@
 package com.shamia.assistant.ui.tabs
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -21,6 +24,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DownloadDone
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Layers
@@ -37,6 +41,10 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -64,6 +72,7 @@ fun ModelsHubTab(
     onSelectModel: (String) -> Unit,
     onNewChatWithModel: (String) -> Unit,
     onToggleInstallModel: (String) -> Unit,
+    onImportLocalModel: (String, Uri) -> Unit,
     onToggleInstallVoice: (String) -> Unit,
     onSelectVoiceGender: (VoiceGender) -> Unit,
     onToggleInteractionSound: () -> Unit,
@@ -76,6 +85,16 @@ fun ModelsHubTab(
     onStartNewChatWithActiveModel: () -> Unit
 ) {
     val activeSpec = state.selectedModel
+    var pendingImportModelId by remember { mutableStateOf<String?>(null) }
+    val importTaskLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        val targetId = pendingImportModelId
+        pendingImportModelId = null
+        if (uri != null && targetId != null) {
+            onImportLocalModel(targetId, uri)
+        }
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -400,6 +419,25 @@ fun ModelsHubTab(
                                     },
                                     color = if (isInstalled) EmeraldOk else TextPrimary
                                 )
+                            }
+                            if (!isInstalled && downloadInfo == null) {
+                                OutlinedButton(
+                                    onClick = {
+                                        pendingImportModelId = spec.id
+                                        importTaskLauncher.launch(arrayOf("*/*"))
+                                    },
+                                    border = BorderStroke(1.dp, CardBorder),
+                                    modifier = Modifier.testTag("import_local_${spec.id}")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.FolderOpen,
+                                        contentDescription = "Import local .task weights",
+                                        tint = SapphireBright,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Import .task", color = SapphireBright)
+                                }
                             }
                         }
                         if (state.ensembleEnabled) {

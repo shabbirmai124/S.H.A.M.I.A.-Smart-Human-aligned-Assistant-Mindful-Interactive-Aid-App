@@ -320,6 +320,7 @@ private fun WorkspaceTabContent(
                 onSwitchToHud()
             },
             onToggleInstallModel = vm::toggleInstallModel,
+            onImportLocalModel = vm::importLocalModelFile,
             onToggleInstallVoice = vm::toggleInstallVoiceModel,
             onSelectVoiceGender = vm::setVoiceGender,
             onToggleInteractionSound = vm::toggleInteractionSound,

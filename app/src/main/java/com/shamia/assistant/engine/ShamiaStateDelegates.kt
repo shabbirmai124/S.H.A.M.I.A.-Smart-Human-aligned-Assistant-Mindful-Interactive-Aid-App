@@ -1,6 +1,7 @@
 package com.shamia.assistant.engine
 
 import android.app.Application
+import android.net.Uri
 import com.shamia.assistant.model.NoteItem
 import com.shamia.assistant.model.RoutineCategory
 import com.shamia.assistant.model.RoutineItem
@@ -40,6 +41,37 @@ internal object ShamiaStateDelegates {
         if (state.modelDownloadProgress.containsKey(modelId)) return
         scope.launch {
             val (ok, detailMessage) = ModelDownloadManager.installModelOffline(app, spec, ui.value.ollamaEndpoint) { pct, statusText ->
+                ui.update { cur -> cur.copy(modelDownloadProgress = cur.modelDownloadProgress + (modelId to (pct to statusText))) }
+            }
+            ui.update { cur ->
+                val nextIds = if (ok) cur.installedModelIds + modelId else cur.installedModelIds
+                if (ok) {
+                    store.saveInstalledModelIds(nextIds)
+                    store.saveSelectedModelId(spec.id)
+                }
+                cur.copy(
+                    installedModelIds = nextIds,
+                    selectedModelId = if (ok) spec.id else cur.selectedModelId,
+                    modelDownloadProgress = cur.modelDownloadProgress - modelId,
+                    statusBanner = detailMessage
+                )
+            }
+        }
+    }
+
+    fun importModelTaskFile(
+        app: Application,
+        scope: CoroutineScope,
+        ui: MutableStateFlow<ShamiaUiState>,
+        store: RoutineSyllabusStore,
+        modelId: String,
+        sourceUri: Uri
+    ) {
+        val state = ui.value
+        val spec = state.allModels.find { it.id == modelId } ?: return
+        if (state.modelDownloadProgress.containsKey(modelId)) return
+        scope.launch {
+            val (ok, detailMessage) = ModelDownloadManager.importLocalTaskFile(app, spec, sourceUri) { pct, statusText ->
                 ui.update { cur -> cur.copy(modelDownloadProgress = cur.modelDownloadProgress + (modelId to (pct to statusText))) }
             }
             ui.update { cur ->

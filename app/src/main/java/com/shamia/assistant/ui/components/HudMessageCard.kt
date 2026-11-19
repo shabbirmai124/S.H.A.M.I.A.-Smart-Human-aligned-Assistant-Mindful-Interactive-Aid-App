@@ -98,13 +98,13 @@ fun HudMessageCard(
                 style = MaterialTheme.typography.labelSmall,
                 color = TextSecondary
             )
-            if (!message.isUser && !message.modelLabel.isNullOrBlank()) {
-                Text(
-                    text = "  ·  ${message.modelLabel}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = TextSecondary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+            if (!message.isUser && message.executionMeta?.verifiedExactModel == true) {
+                Spacer(modifier = Modifier.width(6.dp))
+                Icon(
+                    imageVector = Icons.Filled.VerifiedUser,
+                    contentDescription = "Strictly verified active model response",
+                    tint = EmeraldOk,
+                    modifier = Modifier.size(13.dp)
                 )
             }
         }
@@ -137,7 +137,7 @@ fun HudMessageCard(
         ) {
             Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
                 Text(
-                    text = message.text,
+                    text = if (message.isUser) androidx.compose.ui.text.AnnotatedString(message.text) else renderCleanStyledText(message.text),
                     style = MaterialTheme.typography.bodyLarge,
                     color = TextPrimary
                 )
